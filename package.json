@@ -1,0 +1,118 @@
+{
+  "name": "remote-ss-proxy-controller",
+  "displayName": "Remote SS Proxy Controller",
+  "description": "Manage remote Shadowsocks proxy lifecycle for Remote-SSH from VS Code UI.",
+  "version": "0.1.0",
+  "publisher": "Max",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/defdet/extensions-vpn.git"
+  },
+  "homepage": "https://github.com/defdet/extensions-vpn#readme",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "extensionKind": [
+    "ui",
+    "workspace"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "remoteProxy.configureAccessKey",
+        "title": "Proxy: Configure Access Key"
+      },
+      {
+        "command": "remoteProxy.enable",
+        "title": "Proxy: Enable"
+      },
+      {
+        "command": "remoteProxy.disable",
+        "title": "Proxy: Disable"
+      },
+      {
+        "command": "remoteProxy.status",
+        "title": "Proxy: Status"
+      },
+      {
+        "command": "remoteProxy.testConnectivity",
+        "title": "Proxy: Test Connectivity"
+      },
+      {
+        "command": "remoteProxy.showLogs",
+        "title": "Proxy: Show Logs"
+      },
+      {
+        "command": "remoteProxy.reinstallSslocal",
+        "title": "Proxy: Reinstall sslocal"
+      },
+      {
+        "command": "remoteProxy.showQuickActions",
+        "title": "Proxy: Quick Actions"
+      }
+    ],
+    "configuration": {
+      "title": "Remote Proxy",
+      "properties": {
+        "remoteProxy.sshHost": {
+          "type": "string",
+          "default": "",
+          "description": "Optional SSH host override. If empty, host is derived from the active remote authority."
+        },
+        "remoteProxy.socksPort": {
+          "type": "number",
+          "default": 1080,
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "SOCKS local bind port on remote host."
+        },
+        "remoteProxy.shadowsocksVersion": {
+          "type": "string",
+          "default": "v1.24.0",
+          "description": "Shadowsocks Rust version used by install/reinstall actions."
+        },
+        "remoteProxy.testUrl": {
+          "type": "string",
+          "default": "https://api.openai.com/v1/models",
+          "description": "URL used by test connectivity action."
+        },
+        "remoteProxy.logTailLines": {
+          "type": "number",
+          "default": 80,
+          "minimum": 1,
+          "maximum": 5000,
+          "description": "Number of trailing log lines to fetch."
+        },
+        "remoteProxy.confirmBeforeMutations": {
+          "type": "boolean",
+          "default": true,
+          "description": "Require confirmation before enable, disable, and reinstall actions."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "tsc -p ./",
+    "watch": "tsc -w -p ./",
+    "test:unit": "mocha -u tdd out/test/proxyService.test.js",
+    "test:integration": "node ./out/test/integration/runTest.js",
+    "ci:verify": "tsc -p ./ && mocha -u tdd out/test/proxyService.test.js && node ./out/test/integration/runTest.js",
+    "test": "npm run ci:verify"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/vscode": "^1.95.0",
+    "@types/mocha": "^10.0.10",
+    "@vscode/test-electron": "^2.5.2",
+    "mocha": "^10.8.2",
+    "typescript": "^5.7.2"
+  }
+}

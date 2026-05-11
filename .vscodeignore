@@ -1,0 +1,9 @@
+backups/**
+src/**
+tsconfig.json
+**/*.ts
+**/*.map
+**/*.test.*
+node_modules/**
+.github/**
+EXTENSION_CONVERSION_PLAN.md
