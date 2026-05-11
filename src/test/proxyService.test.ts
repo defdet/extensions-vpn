@@ -108,3 +108,54 @@ suite("Access Key Resolver Unit", () => {
     assert.equal(result, null);
   });
 });
+
+suite("Cluster Profile Unit", () => {
+  // Import inline so the suite is self-contained
+  const { buildRemoteCommand } = require("../services/clusterProfile") as typeof import("../services/clusterProfile");
+
+  const direct = { profile: "direct" as const, dockerContainer: "", customCommandTemplate: "" };
+  const docker = (container: string) => ({ profile: "docker" as const, dockerContainer: container, customCommandTemplate: "" });
+  const custom = (template: string) => ({ profile: "custom" as const, dockerContainer: "", customCommandTemplate: template });
+
+  test("direct profile without env prefix", () => {
+    const cmd = buildRemoteCommand("", direct);
+    assert.equal(cmd, "tr -d '\\r' | bash -s");
+  });
+
+  test("direct profile with env prefix", () => {
+    const cmd = buildRemoteCommand("ACTION='up' PORT='1080'", direct);
+    assert.equal(cmd, "tr -d '\\r' | ACTION='up' PORT='1080' bash -s");
+  });
+
+  test("docker profile wraps in docker exec", () => {
+    const cmd = buildRemoteCommand("ACTION='up'", docker("my-container"));
+    assert.equal(cmd, "tr -d '\\r' | docker exec -i my-container env ACTION='up' bash -s");
+  });
+
+  test("docker profile without env prefix", () => {
+    const cmd = buildRemoteCommand("", docker("my-container"));
+    assert.equal(cmd, "tr -d '\\r' | docker exec -i my-container bash -s");
+  });
+
+  test("docker profile with empty container throws", () => {
+    assert.throws(() => buildRemoteCommand("", docker("")), /no container name/i);
+  });
+
+  test("custom profile replaces {{SCRIPT}} placeholder", () => {
+    const cmd = buildRemoteCommand("KEY='val'", custom("sudo {{SCRIPT}}"));
+    assert.equal(cmd, "tr -d '\\r' | sudo env KEY='val' bash -s");
+  });
+
+  test("custom profile without env prefix", () => {
+    const cmd = buildRemoteCommand("", custom("sudo {{SCRIPT}}"));
+    assert.equal(cmd, "tr -d '\\r' | sudo bash -s");
+  });
+
+  test("custom profile with empty template throws", () => {
+    assert.throws(() => buildRemoteCommand("", custom("")), /no command template/i);
+  });
+
+  test("custom profile without {{SCRIPT}} placeholder throws", () => {
+    assert.throws(() => buildRemoteCommand("", custom("sudo bash -s")), /\{\{SCRIPT\}\}/);
+  });
+});

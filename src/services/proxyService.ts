@@ -1,6 +1,10 @@
 import * as vscode from "vscode";
 import { resolveAccessKey, type AccessKeyRuntime } from "./accessKeyResolver";
 import {
+  type ClusterProfileConfig,
+  type ClusterProfileType,
+} from "./clusterProfile";
+import {
   type ActionName,
   buildSecretKey,
   deriveHostFromAuthority,
@@ -24,6 +28,9 @@ interface RemoteProxyConfig {
   testUrl: string;
   logTailLines: number;
   confirmBeforeMutations: boolean;
+  clusterProfile: ClusterProfileType;
+  dockerContainer: string;
+  customCommandTemplate: string;
 }
 
 interface ScriptRunResult {
@@ -191,7 +198,80 @@ export class ProxyService {
     });
   }
 
+  public async selectProfile(): Promise<void> {
+    const cfg = this.getConfig();
+    const items: Array<{ label: string; description: string; value: ClusterProfileType }> = [
+      {
+        label: "Direct",
+        description: cfg.clusterProfile === "direct" ? "(current)" : "",
+        value: "direct",
+      },
+      {
+        label: "Docker",
+        description: cfg.clusterProfile === "docker" ? "(current)" : "",
+        value: "docker",
+      },
+      {
+        label: "Custom",
+        description: cfg.clusterProfile === "custom" ? "(current)" : "",
+        value: "custom",
+      },
+    ];
+
+    const picked = await vscode.window.showQuickPick(items, {
+      title: "Select Cluster Execution Profile",
+      placeHolder: "How should commands be executed on the remote host?",
+    });
+    if (!picked) {
+      return;
+    }
+
+    const wsCfg = vscode.workspace.getConfiguration("remoteProxy");
+    await wsCfg.update("clusterProfile", picked.value, vscode.ConfigurationTarget.Global);
+
+    if (picked.value === "docker") {
+      const container = await vscode.window.showInputBox({
+        title: "Docker Container Name",
+        prompt: "Enter the name or ID of the Docker container to execute commands in",
+        value: cfg.dockerContainer || "",
+        ignoreFocusOut: true,
+        validateInput: (v) => (v.trim() ? undefined : "Container name is required."),
+      });
+      if (container === undefined) {
+        return;
+      }
+      await wsCfg.update("dockerContainer", container.trim(), vscode.ConfigurationTarget.Global);
+    }
+
+    if (picked.value === "custom") {
+      const template = await vscode.window.showInputBox({
+        title: "Custom Command Template",
+        prompt: "Enter a command template. Use {{SCRIPT}} as placeholder for the bash invocation.",
+        value: cfg.customCommandTemplate || "sudo {{SCRIPT}}",
+        ignoreFocusOut: true,
+        validateInput: (v) => {
+          if (!v.trim()) {
+            return "Template is required.";
+          }
+          if (!v.includes("{{SCRIPT}}")) {
+            return "Template must contain {{SCRIPT}} placeholder.";
+          }
+          return undefined;
+        },
+      });
+      if (template === undefined) {
+        return;
+      }
+      await wsCfg.update("customCommandTemplate", template.trim(), vscode.ConfigurationTarget.Global);
+    }
+
+    await vscode.window.showInformationMessage(`Cluster profile set to '${picked.value}'.`);
+    await this.refreshUi();
+  }
+
   public async showQuickActions(): Promise<void> {
+    const cfg = this.getConfig();
+    const profileLabel = `Profile: ${cfg.clusterProfile}`;
     const quickPick = await vscode.window.showQuickPick(
       [
         { label: "Enable", command: "remoteProxy.enable" },
@@ -200,7 +280,8 @@ export class ProxyService {
         { label: "Test Connectivity", command: "remoteProxy.testConnectivity" },
         { label: "Show Logs", command: "remoteProxy.showLogs" },
         { label: "Reinstall sslocal", command: "remoteProxy.reinstallSslocal" },
-        { label: "Configure Access Key", command: "remoteProxy.configureAccessKey" }
+        { label: "Configure Access Key", command: "remoteProxy.configureAccessKey" },
+        { label: `Select Cluster Profile (${profileLabel})`, command: "remoteProxy.selectProfile" }
       ],
       {
         title: "Remote Proxy Actions"
@@ -285,7 +366,10 @@ export class ProxyService {
       shadowsocksVersion: `${cfg.get<string>("shadowsocksVersion", "v1.24.0")}`.trim(),
       testUrl: `${cfg.get<string>("testUrl", "https://api.openai.com/v1/models")}`.trim(),
       logTailLines: cfg.get<number>("logTailLines", 80),
-      confirmBeforeMutations: cfg.get<boolean>("confirmBeforeMutations", true)
+      confirmBeforeMutations: cfg.get<boolean>("confirmBeforeMutations", true),
+      clusterProfile: cfg.get<ClusterProfileType>("clusterProfile", "direct"),
+      dockerContainer: `${cfg.get<string>("dockerContainer", "")}`.trim(),
+      customCommandTemplate: `${cfg.get<string>("customCommandTemplate", "")}`.trim(),
     };
   }
 
@@ -419,6 +503,13 @@ export class ProxyService {
     envVars: Record<string, string>,
     extraSecrets: string[]
   ): Promise<ScriptRunResult> {
+    const cfg = this.getConfig();
+    const profileConfig: ClusterProfileConfig = {
+      profile: cfg.clusterProfile,
+      dockerContainer: cfg.dockerContainer,
+      customCommandTemplate: cfg.customCommandTemplate,
+    };
+
     const allLines: string[] = [];
     const runtimeSecrets = [...extraSecrets];
 
@@ -431,7 +522,10 @@ export class ProxyService {
         return `${k}=${v}`;
       })
       .join(" ");
-    this.output.appendLine(`$ ssh ${sshHost} [${safeEnv}]`);
+    const profileTag = cfg.clusterProfile === "direct"
+      ? ""
+      : ` [profile=${cfg.clusterProfile}]`;
+    this.output.appendLine(`$ ssh ${sshHost}${profileTag} [${safeEnv}]`);
 
     const onLine = (raw: string): void => {
       const line = redactLine(raw, runtimeSecrets);
@@ -441,7 +535,7 @@ export class ProxyService {
       this.output.appendLine(`${prefix} ${event.message}`);
     };
 
-    const result = await runRemoteScript(sshHost, script, envVars, onLine);
+    const result = await runRemoteScript(sshHost, script, envVars, onLine, profileConfig);
 
     await this.deriveStatusFromOutput(allLines);
 

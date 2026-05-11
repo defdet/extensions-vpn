@@ -2,6 +2,10 @@ import * as cp from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as readline from "node:readline";
+import {
+  buildRemoteCommand,
+  type ClusterProfileConfig,
+} from "./clusterProfile";
 
 export interface SshRunResult {
   exitCode: number;
@@ -28,31 +32,38 @@ function findSshExecutable(): string {
   return "ssh";
 }
 
+const DEFAULT_PROFILE: ClusterProfileConfig = {
+  profile: "direct",
+  dockerContainer: "",
+  customCommandTemplate: "",
+};
+
 /**
  * Execute a bash script on a remote host over SSH.
  *
- * The script is piped via stdin with environment variables injected inline:
- *   ssh <host> "tr -d '\r' | KEY=val KEY2=val2 bash -s"
- *
- * This matches the execution model of the original PowerShell scripts.
+ * The script is piped via stdin. How the script is executed on the remote
+ * side depends on the cluster profile:
+ *   direct  — `tr -d '\r' | KEY=val bash -s`
+ *   docker  — `tr -d '\r' | docker exec -i <container> env KEY=val bash -s`
+ *   custom  — user-supplied template with `{{SCRIPT}}` placeholder
  */
 export function runRemoteScript(
   sshHost: string,
   script: string,
   envVars: Record<string, string>,
-  onLine: (line: string) => void
+  onLine: (line: string) => void,
+  profileConfig?: ClusterProfileConfig
 ): Promise<SshRunResult> {
   const sshBin = findSshExecutable();
+  const profile = profileConfig ?? DEFAULT_PROFILE;
 
   // Build environment prefix: KEY='val' KEY2='val2'
-  const envParts = Object.entries(envVars)
+  const envPrefix = Object.entries(envVars)
     .filter(([, v]) => v !== "")
     .map(([k, v]) => `${k}='${v.replace(/'/g, "'\\''")}'`)
     .join(" ");
 
-  const remoteCommand = envParts
-    ? `tr -d '\\r' | ${envParts} bash -s`
-    : `tr -d '\\r' | bash -s`;
+  const remoteCommand = buildRemoteCommand(envPrefix, profile);
 
   const cleanScript = script.replace(/\r/g, "");
 

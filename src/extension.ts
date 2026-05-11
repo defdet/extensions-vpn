@@ -29,6 +29,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     vscode.commands.registerCommand("remoteProxy.showQuickActions", async () => {
       await service.showQuickActions();
+    }),
+    vscode.commands.registerCommand("remoteProxy.selectProfile", async () => {
+      await service.selectProfile();
     })
   );
 
