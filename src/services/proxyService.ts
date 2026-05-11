@@ -111,7 +111,7 @@ export class ProxyService {
       const runtime = await resolveAccessKey(key, cfg.socksPort);
       this.output.appendLine(`[OK] Key resolved via ${runtime.source}. ${runtime.summary}`);
       await this.runSetupAction("up", host, cfg, runtime, key);
-      await vscode.window.showInformationMessage("Proxy enabled. Reconnect VS Code remote if needed.");
+      await vscode.window.showInformationMessage("Proxy enabled. Reload the window (Ctrl+Shift+P → Reload Window) to apply.");
     });
   }
 

@@ -88,7 +88,7 @@ Recommended path:
 2. Output channel `Remote Proxy`:
    - Structured action logs.
 3. Notifications:
-   - On `up`: suggest VS Code reload/reconnect.
+   - On `up`: suggest window reload (`Ctrl+Shift+P` → `Reload Window`).
    - On `down`: confirm traffic reverted.
 
 ## Limitations to Document
