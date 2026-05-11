@@ -33,10 +33,19 @@ URL_FILE="$STATE_DIR/server_url.txt"
 CFG_FILE="$STATE_DIR/config.json"
 LOG_FILE="$LOG_DIR/sslocal.log"
 SSLOCAL_BIN="$BIN_DIR/sslocal"
+PORT_FILE="$STATE_DIR/port"
 VSCODE_MACHINE_SETTINGS="$HOME/.vscode-server/data/Machine/settings.json"
 
 mkdir -p "$BIN_DIR" "$STATE_DIR" "$LOG_DIR" "$TMP_DIR"
 mkdir -p "$(dirname "$VSCODE_MACHINE_SETTINGS")"
+
+# For non-up actions, read the stored port so status/test/logs use the right one
+if [ "$ACTION" != "up" ] && [ -f "$PORT_FILE" ]; then
+  stored_port="$(cat "$PORT_FILE" 2>/dev/null || true)"
+  if [ -n "$stored_port" ]; then
+    SOCKS_PORT="$stored_port"
+  fi
+fi
 
 log() {
   printf '[%s][%s] %s\\n' "$(date +'%Y-%m-%d %H:%M:%S')" "$1" "$2"
@@ -83,6 +92,35 @@ install_sslocal() {
   rm -rf "$tmp"
   log OK "Installed sslocal to $SSLOCAL_BIN"
   "$SSLOCAL_BIN" --version | head -n1 | sed 's/^/[sslocal-version] /'
+}
+
+is_port_in_use() {
+  local port="$1"
+  if command -v ss >/dev/null 2>&1; then
+    ss -tln 2>/dev/null | awk '{print $4}' | grep -qE "(:|^)$port$"
+    return $?
+  elif command -v netstat >/dev/null 2>&1; then
+    netstat -tln 2>/dev/null | awk '{print $4}' | grep -qE "(:|^)$port$"
+    return $?
+  fi
+  return 1
+}
+
+find_available_port() {
+  local port="$1"
+  local max_attempts=20
+  local attempt=0
+  while [ $attempt -lt $max_attempts ]; do
+    if ! is_port_in_use "$port"; then
+      echo "$port"
+      return 0
+    fi
+    log INFO "Port $port is already in use, trying next..."
+    port=$((port + 1))
+    attempt=$((attempt + 1))
+  done
+  log ERROR "Could not find an available port after $max_attempts attempts (starting from $1)"
+  return 1
 }
 
 is_running() {
@@ -148,6 +186,16 @@ start_sslocal() {
   install_sslocal
   write_runtime_files
   stop_sslocal >/dev/null 2>&1 || true
+
+  # Auto-detect available port
+  local actual_port
+  actual_port="$(find_available_port "$SOCKS_PORT")" || return 1
+  if [ "$actual_port" != "$SOCKS_PORT" ]; then
+    log INFO "Configured port $SOCKS_PORT is in use. Using port $actual_port instead."
+    SOCKS_PORT="$actual_port"
+  fi
+  echo "$SOCKS_PORT" > "$PORT_FILE"
+  printf '[actual-port] %s\n' "$SOCKS_PORT"
 
   local mode
   mode="$(cat "$MODE_FILE")"
@@ -429,7 +477,16 @@ URL_FILE="$STATE_DIR/server_url.txt"
 CFG_FILE="$STATE_DIR/config.json"
 LOG_FILE="$LOG_DIR/sslocal.log"
 SSLOCAL_BIN="$BIN_DIR/sslocal"
+PORT_FILE="$STATE_DIR/port"
 VSCODE_MACHINE_SETTINGS="$HOME/.vscode-server/data/Machine/settings.json"
+
+# Read the stored port if available
+if [ -f "$PORT_FILE" ]; then
+  stored_port="$(cat "$PORT_FILE" 2>/dev/null || true)"
+  if [ -n "$stored_port" ]; then
+    SOCKS_PORT="$stored_port"
+  fi
+fi
 
 log() {
   printf '[%s][%s] %s\\n' "$(date +'%Y-%m-%d %H:%M:%S')" "$1" "$2"
@@ -593,7 +650,7 @@ kill_known_pid
 kill_stray_processes
 set_vscode_proxy_disable
 
-rm -f "$SSLOCAL_BIN" "$MODE_FILE" "$URL_FILE" "$CFG_FILE" >/dev/null 2>&1 || true
+rm -f "$SSLOCAL_BIN" "$MODE_FILE" "$URL_FILE" "$CFG_FILE" "$PORT_FILE" >/dev/null 2>&1 || true
 
 if [ "$REMOVE_ALL_STATE" = "1" ]; then
   rm -rf "$BASE_DIR" >/dev/null 2>&1 || true
