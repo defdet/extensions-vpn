@@ -10,6 +10,7 @@
     "url": "https://github.com/defdet/extensions-vpn.git"
   },
   "homepage": "https://github.com/defdet/extensions-vpn#readme",
+  "icon": "extension_icon.jpg",
   "engines": {
     "vscode": "^1.95.0"
   },
@@ -59,6 +60,18 @@
         "title": "Proxy: Quick Actions"
       }
     ],
+    "menus": {
+      "commandPalette": [
+        { "command": "remoteProxy.configureAccessKey", "when": "remoteName == 'ssh-remote'" },
+        { "command": "remoteProxy.enable", "when": "remoteName == 'ssh-remote'" },
+        { "command": "remoteProxy.disable", "when": "remoteName == 'ssh-remote'" },
+        { "command": "remoteProxy.status", "when": "remoteName == 'ssh-remote'" },
+        { "command": "remoteProxy.testConnectivity", "when": "remoteName == 'ssh-remote'" },
+        { "command": "remoteProxy.showLogs", "when": "remoteName == 'ssh-remote'" },
+        { "command": "remoteProxy.reinstallSslocal", "when": "remoteName == 'ssh-remote'" },
+        { "command": "remoteProxy.showQuickActions", "when": "remoteName == 'ssh-remote'" }
+      ]
+    },
     "configuration": {
       "title": "Remote Proxy",
       "properties": {

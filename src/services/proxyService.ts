@@ -221,13 +221,17 @@ export class ProxyService {
     }
     const snapshot = await this.readStatus(authority);
     if (snapshot.runningState === "on" && snapshot.proxyState !== "disabled") {
-      this.statusBar.text = "Proxy: On";
+      this.statusBar.text = "$(shield) Proxy: On";
+      this.statusBar.backgroundColor = new vscode.ThemeColor("statusBarItem.warningBackground");
     } else if (snapshot.lastErrorCode) {
-      this.statusBar.text = "Proxy: Error";
+      this.statusBar.text = "$(error) Proxy: Error";
+      this.statusBar.backgroundColor = new vscode.ThemeColor("statusBarItem.errorBackground");
     } else if (snapshot.runningState === "off" || snapshot.proxyState === "disabled") {
-      this.statusBar.text = "Proxy: Off";
+      this.statusBar.text = "$(circle-slash) Proxy: Off";
+      this.statusBar.backgroundColor = undefined;
     } else {
-      this.statusBar.text = "Proxy: Unknown";
+      this.statusBar.text = "$(question) Proxy: Unknown";
+      this.statusBar.backgroundColor = undefined;
     }
     this.statusBar.tooltip = this.renderTooltip(authority, snapshot);
   }
