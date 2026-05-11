@@ -34,7 +34,14 @@ CFG_FILE="$STATE_DIR/config.json"
 LOG_FILE="$LOG_DIR/sslocal.log"
 SSLOCAL_BIN="$BIN_DIR/sslocal"
 PORT_FILE="$STATE_DIR/port"
-VSCODE_MACHINE_SETTINGS="$HOME/.vscode-server/data/Machine/settings.json"
+# Auto-detect VS Code settings path: remote (.vscode-server) vs local
+if [ -d "$HOME/.vscode-server" ]; then
+  VSCODE_MACHINE_SETTINGS="$HOME/.vscode-server/data/Machine/settings.json"
+elif [ "$(uname)" = "Darwin" ]; then
+  VSCODE_MACHINE_SETTINGS="$HOME/Library/Application Support/Code/User/settings.json"
+else
+  VSCODE_MACHINE_SETTINGS="$HOME/.config/Code/User/settings.json"
+fi
 
 mkdir -p "$BIN_DIR" "$STATE_DIR" "$LOG_DIR" "$TMP_DIR"
 mkdir -p "$(dirname "$VSCODE_MACHINE_SETTINGS")"
@@ -478,7 +485,14 @@ CFG_FILE="$STATE_DIR/config.json"
 LOG_FILE="$LOG_DIR/sslocal.log"
 SSLOCAL_BIN="$BIN_DIR/sslocal"
 PORT_FILE="$STATE_DIR/port"
-VSCODE_MACHINE_SETTINGS="$HOME/.vscode-server/data/Machine/settings.json"
+# Auto-detect VS Code settings path: remote (.vscode-server) vs local
+if [ -d "$HOME/.vscode-server" ]; then
+  VSCODE_MACHINE_SETTINGS="$HOME/.vscode-server/data/Machine/settings.json"
+elif [ "$(uname)" = "Darwin" ]; then
+  VSCODE_MACHINE_SETTINGS="$HOME/Library/Application Support/Code/User/settings.json"
+else
+  VSCODE_MACHINE_SETTINGS="$HOME/.config/Code/User/settings.json"
+fi
 
 # Read the stored port if available
 if [ -f "$PORT_FILE" ]; then

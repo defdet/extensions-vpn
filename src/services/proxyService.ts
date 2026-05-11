@@ -4,6 +4,7 @@ import {
   type ClusterProfileConfig,
   type ClusterProfileType,
 } from "./clusterProfile";
+import { runLocalScript } from "./localRunner";
 import {
   type ActionName,
   buildSecretKey,
@@ -60,11 +61,7 @@ export class ProxyService {
   }
 
   public async configureAccessKey(): Promise<void> {
-    const authority = this.getRemoteAuthority();
-    if (!authority) {
-      await this.warnUnsupported();
-      return;
-    }
+    const authority = this.getAuthority();
     const input = await vscode.window.showInputBox({
       title: "Configure Proxy Access Key",
       prompt: "Enter ssconf://, ss://, https:// or http:// access key",
@@ -94,12 +91,9 @@ export class ProxyService {
   }
 
   public async enable(): Promise<void> {
-    const authority = this.getRemoteAuthority();
-    if (!authority) {
-      await this.warnUnsupported();
-      return;
-    }
-    const host = await this.resolveHost(authority);
+    const authority = this.getAuthority();
+    const isLocal = authority === "local";
+    const host = isLocal ? "localhost" : await this.resolveHost(authority);
     const key = await this.context.secrets.get(buildSecretKey(authority));
     if (!key) {
       await vscode.window.showErrorMessage(
@@ -108,7 +102,7 @@ export class ProxyService {
       return;
     }
 
-    if (!(await this.confirmMutation("Enable", host, "install/start proxy and update remote VS Code proxy settings"))) {
+    if (!(await this.confirmMutation("Enable", host, "install/start proxy and update VS Code proxy settings"))) {
       return;
     }
 
@@ -117,83 +111,68 @@ export class ProxyService {
       this.output.appendLine("[INFO] Resolving access key payload...");
       const runtime = await resolveAccessKey(key, cfg.socksPort);
       this.output.appendLine(`[OK] Key resolved via ${runtime.source}. ${runtime.summary}`);
-      await this.runSetupAction("up", host, cfg, runtime, key);
+      await this.runSetupAction("up", host, cfg, runtime, key, isLocal);
       await vscode.window.showInformationMessage("Proxy enabled. Reload the window (Ctrl+Shift+P → Reload Window) to apply.");
     });
   }
 
   public async disable(): Promise<void> {
-    const authority = this.getRemoteAuthority();
-    if (!authority) {
-      await this.warnUnsupported();
-      return;
-    }
-    const host = await this.resolveHost(authority);
-    if (!(await this.confirmMutation("Disable", host, "stop proxy, clear remote proxy settings, and uninstall sslocal"))) {
+    const authority = this.getAuthority();
+    const isLocal = authority === "local";
+    const host = isLocal ? "localhost" : await this.resolveHost(authority);
+    if (!(await this.confirmMutation("Disable", host, "stop proxy, clear proxy settings, and uninstall sslocal"))) {
       return;
     }
     const cfg = this.getConfig();
     await this.executeWithStatus(authority, "disable", async () => {
-      await this.runRevertAction(host, cfg);
+      await this.runRevertAction(host, cfg, isLocal);
       await vscode.window.showInformationMessage("Proxy disabled.");
     });
   }
 
   public async status(): Promise<void> {
-    const authority = this.getRemoteAuthority();
-    if (!authority) {
-      await this.warnUnsupported();
-      return;
-    }
-    const host = await this.resolveHost(authority);
+    const authority = this.getAuthority();
+    const isLocal = authority === "local";
+    const host = isLocal ? "localhost" : await this.resolveHost(authority);
     const cfg = this.getConfig();
     await this.executeWithStatus(authority, "status", async () => {
-      await this.runSetupAction("status", host, cfg);
+      await this.runSetupAction("status", host, cfg, undefined, undefined, isLocal);
       this.output.show(true);
     });
   }
 
   public async testConnectivity(): Promise<void> {
-    const authority = this.getRemoteAuthority();
-    if (!authority) {
-      await this.warnUnsupported();
-      return;
-    }
-    const host = await this.resolveHost(authority);
+    const authority = this.getAuthority();
+    const isLocal = authority === "local";
+    const host = isLocal ? "localhost" : await this.resolveHost(authority);
     const cfg = this.getConfig();
     await this.executeWithStatus(authority, "test", async () => {
-      await this.runSetupAction("test", host, cfg);
+      await this.runSetupAction("test", host, cfg, undefined, undefined, isLocal);
       await vscode.window.showInformationMessage("Connectivity test completed.");
     });
   }
 
   public async showLogs(): Promise<void> {
-    const authority = this.getRemoteAuthority();
-    if (!authority) {
-      await this.warnUnsupported();
-      return;
-    }
-    const host = await this.resolveHost(authority);
+    const authority = this.getAuthority();
+    const isLocal = authority === "local";
+    const host = isLocal ? "localhost" : await this.resolveHost(authority);
     const cfg = this.getConfig();
     await this.executeWithStatus(authority, "logs", async () => {
-      await this.runSetupAction("logs", host, cfg);
+      await this.runSetupAction("logs", host, cfg, undefined, undefined, isLocal);
       this.output.show(true);
     });
   }
 
   public async reinstallSslocal(): Promise<void> {
-    const authority = this.getRemoteAuthority();
-    if (!authority) {
-      await this.warnUnsupported();
-      return;
-    }
-    const host = await this.resolveHost(authority);
-    if (!(await this.confirmMutation("Reinstall sslocal", host, "reinstall shadowsocks client binary on remote host"))) {
+    const authority = this.getAuthority();
+    const isLocal = authority === "local";
+    const host = isLocal ? "localhost" : await this.resolveHost(authority);
+    if (!(await this.confirmMutation("Reinstall sslocal", host, "reinstall shadowsocks client binary"))) {
       return;
     }
     const cfg = this.getConfig();
     await this.executeWithStatus(authority, "reinstall", async () => {
-      await this.runSetupAction("install", host, cfg);
+      await this.runSetupAction("install", host, cfg, undefined, undefined, isLocal);
       await vscode.window.showInformationMessage("sslocal reinstall completed.");
     });
   }
@@ -294,12 +273,9 @@ export class ProxyService {
   }
 
   public async refreshUi(): Promise<void> {
-    const authority = this.getRemoteAuthority();
-    if (!authority) {
-      this.statusBar.text = "Proxy: Unsupported";
-      this.statusBar.tooltip = "Remote Proxy works only in Remote-SSH sessions.";
-      return;
-    }
+    const authority = this.getAuthority();
+    const isLocal = authority === "local";
+    const modeLabel = isLocal ? "Local" : "Remote";
     const snapshot = await this.readStatus(authority);
     if (snapshot.runningState === "on" && snapshot.proxyState !== "disabled") {
       this.statusBar.text = "$(shield) Proxy: On";
@@ -318,8 +294,10 @@ export class ProxyService {
   }
 
   private renderTooltip(authority: string, snapshot: ProxyStatusSnapshot): string {
+    const mode = authority === "local" ? "Local" : "Remote";
     const lines = [
-      `Remote authority: ${authority}`,
+      `Mode: ${mode}`,
+      `Authority: ${authority}`,
       `Last action: ${snapshot.lastAction}`,
       `Running state: ${snapshot.runningState}`,
       `Proxy settings: ${snapshot.proxyState}`
@@ -373,7 +351,7 @@ export class ProxyService {
     };
   }
 
-  private getRemoteAuthority(): string | undefined {
+  private getAuthority(): string {
     const folderAuthority = vscode.workspace.workspaceFolders?.[0]?.uri.authority;
     if (folderAuthority?.startsWith("ssh-remote+")) {
       return folderAuthority;
@@ -381,7 +359,7 @@ export class ProxyService {
     if (vscode.env.remoteName === "ssh-remote") {
       return "ssh-remote";
     }
-    return undefined;
+    return "local";
   }
 
   private async resolveHost(authority: string): Promise<string> {
@@ -459,15 +437,16 @@ export class ProxyService {
   }
 
   // ---------------------------------------------------------------------------
-  // Remote execution — replaces PowerShell invocation with direct SSH
+  // Script execution — dispatches to local or SSH runner
   // ---------------------------------------------------------------------------
 
   private async runSetupAction(
     action: "up" | "down" | "status" | "test" | "logs" | "install",
-    sshHost: string,
+    host: string,
     cfg: RemoteProxyConfig,
     runtime?: AccessKeyRuntime,
-    accessKey?: string
+    accessKey?: string,
+    isLocal?: boolean
   ): Promise<ScriptRunResult> {
     const envVars: Record<string, string> = {
       ACTION: action,
@@ -482,26 +461,28 @@ export class ProxyService {
       envVars.CONFIG_B64 = runtime.configB64;
     }
     const secrets = accessKey ? [accessKey] : [];
-    return this.executeRemote(sshHost, SETUP_REMOTE_SCRIPT, envVars, secrets);
+    return this.executeScript(host, SETUP_REMOTE_SCRIPT, envVars, secrets, isLocal);
   }
 
   private async runRevertAction(
-    sshHost: string,
-    cfg: RemoteProxyConfig
+    host: string,
+    cfg: RemoteProxyConfig,
+    isLocal?: boolean
   ): Promise<ScriptRunResult> {
     const envVars: Record<string, string> = {
       SOCKS_PORT: `${cfg.socksPort}`,
       TAIL_LINES: `${cfg.logTailLines}`,
       REMOVE_ALL_STATE: "0",
     };
-    return this.executeRemote(sshHost, REVERT_REMOTE_SCRIPT, envVars, []);
+    return this.executeScript(host, REVERT_REMOTE_SCRIPT, envVars, [], isLocal);
   }
 
-  private async executeRemote(
-    sshHost: string,
+  private async executeScript(
+    host: string,
     script: string,
     envVars: Record<string, string>,
-    extraSecrets: string[]
+    extraSecrets: string[],
+    isLocal?: boolean
   ): Promise<ScriptRunResult> {
     const cfg = this.getConfig();
     const profileConfig: ClusterProfileConfig = {
@@ -525,7 +506,8 @@ export class ProxyService {
     const profileTag = cfg.clusterProfile === "direct"
       ? ""
       : ` [profile=${cfg.clusterProfile}]`;
-    this.output.appendLine(`$ ssh ${sshHost}${profileTag} [${safeEnv}]`);
+    const modeTag = isLocal ? "local" : `ssh ${host}`;
+    this.output.appendLine(`$ ${modeTag}${profileTag} [${safeEnv}]`);
 
     const onLine = (raw: string): void => {
       const line = redactLine(raw, runtimeSecrets);
@@ -535,7 +517,9 @@ export class ProxyService {
       this.output.appendLine(`${prefix} ${event.message}`);
     };
 
-    const result = await runRemoteScript(sshHost, script, envVars, onLine, profileConfig);
+    const result = isLocal
+      ? await runLocalScript(script, envVars, onLine, profileConfig)
+      : await runRemoteScript(host, script, envVars, onLine, profileConfig);
 
     await this.deriveStatusFromOutput(allLines);
 
@@ -552,19 +536,10 @@ export class ProxyService {
   }
 
   private async deriveStatusFromOutput(lines: string[]): Promise<void> {
-    const authority = this.getRemoteAuthority();
-    if (!authority) {
-      return;
-    }
+    const authority = this.getAuthority();
     const patch = deriveStatusPatch(lines);
     if (Object.keys(patch).length > 0) {
       await this.updateStatus(authority, patch);
     }
-  }
-
-  private async warnUnsupported(): Promise<void> {
-    await vscode.window.showWarningMessage(
-      "Remote Proxy v1 supports only active Remote-SSH sessions (vscode.env.remoteName === 'ssh-remote')."
-    );
   }
 }

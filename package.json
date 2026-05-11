@@ -2,7 +2,7 @@
   "name": "remote-ss-proxy-controller",
   "displayName": "Remote SS Proxy Controller",
   "description": "Manage remote Shadowsocks proxy lifecycle for Remote-SSH from VS Code UI.",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "publisher": "Max",
   "license": "MIT",
   "repository": {
@@ -66,15 +66,15 @@
     ],
     "menus": {
       "commandPalette": [
-        { "command": "remoteProxy.configureAccessKey", "when": "remoteName == 'ssh-remote'" },
-        { "command": "remoteProxy.enable", "when": "remoteName == 'ssh-remote'" },
-        { "command": "remoteProxy.disable", "when": "remoteName == 'ssh-remote'" },
-        { "command": "remoteProxy.status", "when": "remoteName == 'ssh-remote'" },
-        { "command": "remoteProxy.testConnectivity", "when": "remoteName == 'ssh-remote'" },
-        { "command": "remoteProxy.showLogs", "when": "remoteName == 'ssh-remote'" },
-        { "command": "remoteProxy.reinstallSslocal", "when": "remoteName == 'ssh-remote'" },
-        { "command": "remoteProxy.showQuickActions", "when": "remoteName == 'ssh-remote'" },
-        { "command": "remoteProxy.selectProfile", "when": "remoteName == 'ssh-remote'" }
+        { "command": "remoteProxy.configureAccessKey" },
+        { "command": "remoteProxy.enable" },
+        { "command": "remoteProxy.disable" },
+        { "command": "remoteProxy.status" },
+        { "command": "remoteProxy.testConnectivity" },
+        { "command": "remoteProxy.showLogs" },
+        { "command": "remoteProxy.reinstallSslocal" },
+        { "command": "remoteProxy.showQuickActions" },
+        { "command": "remoteProxy.selectProfile" }
       ]
     },
     "configuration": {

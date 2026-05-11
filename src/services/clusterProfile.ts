@@ -79,3 +79,60 @@ export function buildRemoteCommand(
     }
   }
 }
+
+/**
+ * Build the command for **local** execution (no SSH wrapper).
+ *
+ * The cluster profile wrapping (docker, custom) applies identically —
+ * it wraps the bash invocation regardless of whether SSH is involved.
+ *
+ * @param envPrefix  Pre-built `KEY='val' KEY2='val2'` string (may be empty).
+ * @param profile    Active cluster profile configuration.
+ * @returns The full local command string passed to `bash -c "<command>"`.
+ */
+export function buildLocalCommand(
+  envPrefix: string,
+  profile: ClusterProfileConfig
+): string {
+  const scriptInvocation = envPrefix ? `env ${envPrefix} bash -s` : "bash -s";
+
+  switch (profile.profile) {
+    case "direct": {
+      const bashCmd = envPrefix ? `${envPrefix} bash -s` : "bash -s";
+      return bashCmd;
+    }
+
+    case "docker": {
+      const container = profile.dockerContainer.trim();
+      if (!container) {
+        throw new Error(
+          "Cluster profile is 'docker' but no container name is configured. " +
+            "Set 'remoteProxy.dockerContainer' in settings."
+        );
+      }
+      return `docker exec -i ${container} ${scriptInvocation}`;
+    }
+
+    case "custom": {
+      const template = profile.customCommandTemplate.trim();
+      if (!template) {
+        throw new Error(
+          "Cluster profile is 'custom' but no command template is configured. " +
+            "Set 'remoteProxy.customCommandTemplate' in settings."
+        );
+      }
+      if (!template.includes("{{SCRIPT}}")) {
+        throw new Error(
+          "Custom command template must contain the {{SCRIPT}} placeholder. " +
+            "Example: 'sudo {{SCRIPT}}'"
+        );
+      }
+      return template.replace(/\{\{SCRIPT\}\}/g, scriptInvocation);
+    }
+
+    default: {
+      const _exhaustive: never = profile.profile;
+      throw new Error(`Unknown cluster profile: ${_exhaustive}`);
+    }
+  }
+}

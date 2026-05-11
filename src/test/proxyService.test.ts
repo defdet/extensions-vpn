@@ -159,3 +159,63 @@ suite("Cluster Profile Unit", () => {
     assert.throws(() => buildRemoteCommand("", custom("sudo bash -s")), /\{\{SCRIPT\}\}/);
   });
 });
+
+suite("Local Execution Unit", () => {
+  const { buildLocalCommand } = require("../services/clusterProfile") as typeof import("../services/clusterProfile");
+  const { findLocalBash } = require("../services/localRunner") as typeof import("../services/localRunner");
+
+  const direct = { profile: "direct" as const, dockerContainer: "", customCommandTemplate: "" };
+  const docker = (container: string) => ({ profile: "docker" as const, dockerContainer: container, customCommandTemplate: "" });
+  const custom = (template: string) => ({ profile: "custom" as const, dockerContainer: "", customCommandTemplate: template });
+
+  test("direct local profile without env prefix", () => {
+    const cmd = buildLocalCommand("", direct);
+    assert.equal(cmd, "bash -s");
+  });
+
+  test("direct local profile with env prefix", () => {
+    const cmd = buildLocalCommand("ACTION='up' PORT='1080'", direct);
+    assert.equal(cmd, "ACTION='up' PORT='1080' bash -s");
+  });
+
+  test("docker local profile wraps in docker exec", () => {
+    const cmd = buildLocalCommand("ACTION='up'", docker("my-container"));
+    assert.equal(cmd, "docker exec -i my-container env ACTION='up' bash -s");
+  });
+
+  test("docker local profile without env prefix", () => {
+    const cmd = buildLocalCommand("", docker("my-container"));
+    assert.equal(cmd, "docker exec -i my-container bash -s");
+  });
+
+  test("docker local profile with empty container throws", () => {
+    assert.throws(() => buildLocalCommand("", docker("")), /no container name/i);
+  });
+
+  test("custom local profile replaces {{SCRIPT}} placeholder", () => {
+    const cmd = buildLocalCommand("KEY='val'", custom("sudo {{SCRIPT}}"));
+    assert.equal(cmd, "sudo env KEY='val' bash -s");
+  });
+
+  test("custom local profile without env prefix", () => {
+    const cmd = buildLocalCommand("", custom("sudo {{SCRIPT}}"));
+    assert.equal(cmd, "sudo bash -s");
+  });
+
+  test("findLocalBash returns a string", () => {
+    // On CI / dev machines, this should resolve to something.
+    // On Windows without Git, it will throw — which is the expected behavior.
+    try {
+      const bash = findLocalBash();
+      assert.equal(typeof bash, "string");
+      assert.ok(bash.length > 0);
+    } catch (err) {
+      // On Windows without Git Bash, we expect a specific error message
+      if (process.platform === "win32") {
+        assert.ok((err as Error).message.includes("Git Bash is required"));
+      } else {
+        throw err;
+      }
+    }
+  });
+});
