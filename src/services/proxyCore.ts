@@ -33,18 +33,6 @@ export interface ScriptEvent {
   message: string;
 }
 
-export interface SetupArgsConfig {
-  socksPort: number;
-  shadowsocksVersion: string;
-  testUrl: string;
-  logTailLines: number;
-}
-
-export interface RevertArgsConfig {
-  socksPort: number;
-  logTailLines: number;
-}
-
 export function buildSecretKey(authority: string): string {
   return `${SECRET_PREFIX}${authority}`;
 }
@@ -103,9 +91,9 @@ export function deriveStatusPatch(lines: string[]): Partial<ProxyStatusSnapshot>
     }
 
     if (line.includes("[proxy-state]") || line.includes("[proxy-after]")) {
-      if (/proxySupport['"]?\s*:\s*['"]on['"]/iu.test(line)) {
+      if (/proxySupport[']?\s*:\s*[']on[']/iu.test(line)) {
         proxyState = "enabled";
-      } else if (/proxySupport['"]?\s*:\s*['"]off['"]/iu.test(line)) {
+      } else if (/proxySupport[']?\s*:\s*[']off[']/iu.test(line)) {
         proxyState = "disabled";
       }
     }
@@ -125,49 +113,6 @@ export function deriveStatusPatch(lines: string[]): Partial<ProxyStatusSnapshot>
     patch.proxyState = proxyState;
   }
   return patch;
-}
-
-export function buildSetupScriptArgs(
-  scriptPath: string,
-  action: "up" | "down" | "status" | "test" | "logs" | "install",
-  sshHost: string,
-  cfg: SetupArgsConfig,
-  accessKey?: string
-): string[] {
-  const args = [
-    "-File",
-    scriptPath,
-    "-SshHost",
-    sshHost,
-    "-Action",
-    action,
-    "-SocksPort",
-    `${cfg.socksPort}`,
-    "-ShadowsocksVersion",
-    cfg.shadowsocksVersion,
-    "-TestUrl",
-    cfg.testUrl,
-    "-LogTailLines",
-    `${cfg.logTailLines}`,
-    "-SkipLocalCodexWorkspace"
-  ];
-  if (accessKey) {
-    args.push("-AccessKey", accessKey);
-  }
-  return args;
-}
-
-export function buildRevertScriptArgs(scriptPath: string, sshHost: string, cfg: RevertArgsConfig): string[] {
-  return [
-    "-File",
-    scriptPath,
-    "-SshHost",
-    sshHost,
-    "-SocksPort",
-    `${cfg.socksPort}`,
-    "-LogTailLines",
-    `${cfg.logTailLines}`
-  ];
 }
 
 export function normalizeProxyError(error: unknown): { code: ErrorCode; message: string } {

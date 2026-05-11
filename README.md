@@ -61,7 +61,9 @@ Or in VS Code: **Extensions** → `⋯` menu → **Install from VSIX…**
 
 - VS Code with **Remote-SSH** extension
 - Remote host with `python3`, `curl`, and outbound access to the Shadowsocks endpoint
-- PowerShell (Windows) or `pwsh` (macOS/Linux) on the local machine
+- SSH client on the local machine (built-in on Windows 10+, macOS, and Linux)
+
+> **Cross-platform:** Works on Windows, macOS, and Linux — no PowerShell or other shell dependencies.
 
 ## Notes
 

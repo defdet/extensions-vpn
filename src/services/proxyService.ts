@@ -1,12 +1,8 @@
-﻿import * as cp from "node:child_process";
-import * as path from "node:path";
-import * as readline from "node:readline";
 import * as vscode from "vscode";
+import { resolveAccessKey, type AccessKeyRuntime } from "./accessKeyResolver";
 import {
   type ActionName,
-  buildRevertScriptArgs,
   buildSecretKey,
-  buildSetupScriptArgs,
   deriveHostFromAuthority,
   deriveStatusPatch,
   normalizeProxyError,
@@ -14,10 +10,10 @@ import {
   type ProxyStatusSnapshot,
   redactLine
 } from "./proxyCore";
+import { SETUP_REMOTE_SCRIPT, REVERT_REMOTE_SCRIPT } from "./remoteScripts";
+import { runRemoteScript } from "./sshRunner";
 
 const OUTPUT_NAME = "Remote Proxy";
-const SCRIPT_SETUP = "setup_remote_ssconf_proxy.ps1";
-const SCRIPT_REVERT = "revert_remote_ssconf_proxy.ps1";
 const STATUS_PREFIX = "remoteProxy.status.";
 const LAST_HOST_KEY = "remoteProxy.lastSshHost";
 
@@ -111,7 +107,10 @@ export class ProxyService {
 
     const cfg = this.getConfig();
     await this.executeWithStatus(authority, "enable", async () => {
-      await this.runSetupScript("up", host, cfg, key);
+      this.output.appendLine("[INFO] Resolving access key payload...");
+      const runtime = await resolveAccessKey(key, cfg.socksPort);
+      this.output.appendLine(`[OK] Key resolved via ${runtime.source}. ${runtime.summary}`);
+      await this.runSetupAction("up", host, cfg, runtime, key);
       await vscode.window.showInformationMessage("Proxy enabled. Reconnect VS Code remote if needed.");
     });
   }
@@ -128,7 +127,7 @@ export class ProxyService {
     }
     const cfg = this.getConfig();
     await this.executeWithStatus(authority, "disable", async () => {
-      await this.runRevertScript(host, cfg);
+      await this.runRevertAction(host, cfg);
       await vscode.window.showInformationMessage("Proxy disabled.");
     });
   }
@@ -142,7 +141,7 @@ export class ProxyService {
     const host = await this.resolveHost(authority);
     const cfg = this.getConfig();
     await this.executeWithStatus(authority, "status", async () => {
-      await this.runSetupScript("status", host, cfg);
+      await this.runSetupAction("status", host, cfg);
       this.output.show(true);
     });
   }
@@ -156,7 +155,7 @@ export class ProxyService {
     const host = await this.resolveHost(authority);
     const cfg = this.getConfig();
     await this.executeWithStatus(authority, "test", async () => {
-      await this.runSetupScript("test", host, cfg);
+      await this.runSetupAction("test", host, cfg);
       await vscode.window.showInformationMessage("Connectivity test completed.");
     });
   }
@@ -170,7 +169,7 @@ export class ProxyService {
     const host = await this.resolveHost(authority);
     const cfg = this.getConfig();
     await this.executeWithStatus(authority, "logs", async () => {
-      await this.runSetupScript("logs", host, cfg);
+      await this.runSetupAction("logs", host, cfg);
       this.output.show(true);
     });
   }
@@ -187,7 +186,7 @@ export class ProxyService {
     }
     const cfg = this.getConfig();
     await this.executeWithStatus(authority, "reinstall", async () => {
-      await this.runSetupScript("install", host, cfg);
+      await this.runSetupAction("install", host, cfg);
       await vscode.window.showInformationMessage("sslocal reinstall completed.");
     });
   }
@@ -371,45 +370,65 @@ export class ProxyService {
     return choice === "Run";
   }
 
-  private getPowerShellCommand(): { bin: string; args: string[] } {
-    if (process.platform === "win32") {
-      return { bin: "powershell.exe", args: ["-ExecutionPolicy", "Bypass"] };
-    }
-    return { bin: "pwsh", args: ["-ExecutionPolicy", "Bypass"] };
-  }
+  // ---------------------------------------------------------------------------
+  // Remote execution — replaces PowerShell invocation with direct SSH
+  // ---------------------------------------------------------------------------
 
-  private extensionScriptPath(scriptName: string): string {
-    return path.join(this.context.extensionPath, "resources", "scripts", scriptName);
-  }
-
-  private async runSetupScript(
+  private async runSetupAction(
     action: "up" | "down" | "status" | "test" | "logs" | "install",
     sshHost: string,
     cfg: RemoteProxyConfig,
+    runtime?: AccessKeyRuntime,
     accessKey?: string
   ): Promise<ScriptRunResult> {
-    const scriptPath = this.extensionScriptPath(SCRIPT_SETUP);
-    const args = buildSetupScriptArgs(scriptPath, action, sshHost, cfg, accessKey);
-    return this.runScript(args, accessKey ? [accessKey] : []);
+    const envVars: Record<string, string> = {
+      ACTION: action,
+      SOCKS_PORT: `${cfg.socksPort}`,
+      SS_VERSION: cfg.shadowsocksVersion,
+      TEST_URL: cfg.testUrl,
+      TAIL_LINES: `${cfg.logTailLines}`,
+    };
+    if (runtime) {
+      envVars.RUNTIME_MODE = runtime.mode;
+      envVars.SERVER_URL_B64 = runtime.serverUrlB64;
+      envVars.CONFIG_B64 = runtime.configB64;
+    }
+    const secrets = accessKey ? [accessKey] : [];
+    return this.executeRemote(sshHost, SETUP_REMOTE_SCRIPT, envVars, secrets);
   }
 
-  private async runRevertScript(sshHost: string, cfg: RemoteProxyConfig): Promise<ScriptRunResult> {
-    const scriptPath = this.extensionScriptPath(SCRIPT_REVERT);
-    const args = buildRevertScriptArgs(scriptPath, sshHost, cfg);
-    return this.runScript(args, []);
+  private async runRevertAction(
+    sshHost: string,
+    cfg: RemoteProxyConfig
+  ): Promise<ScriptRunResult> {
+    const envVars: Record<string, string> = {
+      SOCKS_PORT: `${cfg.socksPort}`,
+      TAIL_LINES: `${cfg.logTailLines}`,
+      REMOVE_ALL_STATE: "0",
+    };
+    return this.executeRemote(sshHost, REVERT_REMOTE_SCRIPT, envVars, []);
   }
 
-  private async runScript(args: string[], extraSecrets: string[]): Promise<ScriptRunResult> {
-    const cmd = this.getPowerShellCommand();
-    const fullArgs = [...cmd.args, ...args];
+  private async executeRemote(
+    sshHost: string,
+    script: string,
+    envVars: Record<string, string>,
+    extraSecrets: string[]
+  ): Promise<ScriptRunResult> {
     const allLines: string[] = [];
     const runtimeSecrets = [...extraSecrets];
-    const safeArgs = this.sanitizeArgsForLog(fullArgs, runtimeSecrets);
-    this.output.appendLine(`$ ${cmd.bin} ${safeArgs.map((part) => this.quoteArg(part)).join(" ")}`);
-    const proc = cp.spawn(cmd.bin, fullArgs, {
-      cwd: this.context.extensionPath,
-      shell: false
-    });
+
+    // Log the command with sensitive values redacted
+    const safeEnv = Object.entries(envVars)
+      .map(([k, v]) => {
+        if (/key|secret|password|b64/iu.test(k) && v) {
+          return `${k}=<redacted>`;
+        }
+        return `${k}=${v}`;
+      })
+      .join(" ");
+    this.output.appendLine(`$ ssh ${sshHost} [${safeEnv}]`);
+
     const onLine = (raw: string): void => {
       const line = redactLine(raw, runtimeSecrets);
       allLines.push(line);
@@ -418,45 +437,20 @@ export class ProxyService {
       this.output.appendLine(`${prefix} ${event.message}`);
     };
 
-    const outRl = readline.createInterface({ input: proc.stdout });
-    outRl.on("line", onLine);
-    const errRl = readline.createInterface({ input: proc.stderr });
-    errRl.on("line", onLine);
-
-    const exitCode = await new Promise<number>((resolve, reject) => {
-      proc.once("error", reject);
-      proc.once("close", (code) => resolve(code ?? 1));
-    });
+    const result = await runRemoteScript(sshHost, script, envVars, onLine);
 
     await this.deriveStatusFromOutput(allLines);
 
-    if (exitCode !== 0) {
-      const err = new Error(`Script exited with code ${exitCode}.`);
+    if (result.exitCode !== 0) {
+      const err = new Error(`Script exited with code ${result.exitCode}.`);
       (err as { output?: string[] }).output = allLines;
       throw err;
     }
 
     return {
-      exitCode,
+      exitCode: result.exitCode,
       lines: allLines
     };
-  }
-
-  private sanitizeArgsForLog(args: string[], secrets: string[]): string[] {
-    const out = [...args];
-    for (let i = 0; i < out.length; i += 1) {
-      if (/^-AccessKey$/iu.test(out[i]) && i + 1 < out.length) {
-        out[i + 1] = "<redacted>";
-      }
-    }
-    return out.map((arg) => redactLine(arg, secrets));
-  }
-
-  private quoteArg(arg: string): string {
-    if (/[\s"]/u.test(arg)) {
-      return `"${arg.replace(/"/g, '\\"')}"`;
-    }
-    return arg;
   }
 
   private async deriveStatusFromOutput(lines: string[]): Promise<void> {

@@ -2,7 +2,7 @@
   "name": "remote-ss-proxy-controller",
   "displayName": "Remote SS Proxy Controller",
   "description": "Manage remote Shadowsocks proxy lifecycle for Remote-SSH from VS Code UI.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "Max",
   "license": "MIT",
   "repository": {

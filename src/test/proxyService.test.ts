@@ -1,16 +1,19 @@
 import assert from "node:assert/strict";
 import {
-  buildRevertScriptArgs,
   buildSecretKey,
-  buildSetupScriptArgs,
   deriveHostFromAuthority,
   deriveStatusPatch,
   normalizeProxyError,
   parseScriptEvent,
   redactLine
 } from "../services/proxyCore";
+import {
+  encodeBase64Utf8,
+  parseEndpoint,
+  parseYamlLikePayload
+} from "../services/accessKeyResolver";
 
-suite("Proxy Service Unit", () => {
+suite("Proxy Core Unit", () => {
   test("buildSecretKey uses per-authority namespace", () => {
     assert.equal(
       buildSecretKey("ssh-remote+gpu_polymer_2"),
@@ -21,36 +24,6 @@ suite("Proxy Service Unit", () => {
   test("deriveHostFromAuthority uses configured override first", () => {
     assert.equal(deriveHostFromAuthority("ssh-remote+gpu_polymer_2", "custom-host"), "custom-host");
     assert.equal(deriveHostFromAuthority("ssh-remote+gpu_polymer_2", ""), "gpu_polymer_2");
-  });
-
-  test("buildSetupScriptArgs builds expected action payload", () => {
-    const args = buildSetupScriptArgs(
-      "C:\\tmp\\setup.ps1",
-      "up",
-      "gpu_polymer_2",
-      {
-        socksPort: 1080,
-        shadowsocksVersion: "v1.24.0",
-        testUrl: "https://api.openai.com/v1/models",
-        logTailLines: 80
-      },
-      "ssconf://abc"
-    );
-    assert.equal(args[0], "-File");
-    assert.ok(args.includes("-Action"));
-    assert.ok(args.includes("up"));
-    assert.ok(args.includes("-AccessKey"));
-  });
-
-  test("buildRevertScriptArgs builds expected payload", () => {
-    const args = buildRevertScriptArgs("C:\\tmp\\revert.ps1", "gpu_polymer_2", {
-      socksPort: 1080,
-      logTailLines: 120
-    });
-    assert.ok(args.includes("-SshHost"));
-    assert.ok(args.includes("gpu_polymer_2"));
-    assert.ok(args.includes("-LogTailLines"));
-    assert.ok(args.includes("120"));
   });
 
   test("redactLine masks secrets and ss urls", () => {
@@ -78,5 +51,60 @@ suite("Proxy Service Unit", () => {
   test("normalizeProxyError maps auth failures", () => {
     const out = normalizeProxyError(new Error("Failed to fetch URL: test"));
     assert.equal(out.code, "AuthKeyError");
+  });
+});
+
+suite("Access Key Resolver Unit", () => {
+  test("encodeBase64Utf8 encodes correctly", () => {
+    const encoded = encodeBase64Utf8("ss://test@example:8080");
+    const decoded = Buffer.from(encoded, "base64").toString("utf-8");
+    assert.equal(decoded, "ss://test@example:8080");
+  });
+
+  test("parseEndpoint handles host:port", () => {
+    const ep = parseEndpoint("example.com:8388");
+    assert.equal(ep.host, "example.com");
+    assert.equal(ep.port, 8388);
+  });
+
+  test("parseEndpoint handles IPv6 [host]:port", () => {
+    const ep = parseEndpoint("[::1]:8388");
+    assert.equal(ep.host, "::1");
+    assert.equal(ep.port, 8388);
+  });
+
+  test("parseEndpoint throws on missing port", () => {
+    assert.throws(() => parseEndpoint("example.com"), /host:port/);
+  });
+
+  test("parseYamlLikePayload extracts config from YAML-like text", () => {
+    const payload = [
+      "# comment",
+      "endpoint: example.com:8388",
+      "cipher: aes-256-gcm",
+      "secret: hunter2",
+    ].join("\n");
+    const result = parseYamlLikePayload(payload);
+    assert.ok(result);
+    assert.equal(result.server, "example.com");
+    assert.equal(result.server_port, 8388);
+    assert.equal(result.password, "hunter2");
+    assert.equal(result.method, "aes-256-gcm");
+  });
+
+  test("parseYamlLikePayload strips quotes from secret", () => {
+    const payload = [
+      "endpoint: 1.2.3.4:443",
+      "cipher: chacha20-ietf-poly1305",
+      'secret: "my secret"',
+    ].join("\n");
+    const result = parseYamlLikePayload(payload);
+    assert.ok(result);
+    assert.equal(result.password, "my secret");
+  });
+
+  test("parseYamlLikePayload returns null for incomplete payload", () => {
+    const result = parseYamlLikePayload("endpoint: a:1\ncipher: x\n");
+    assert.equal(result, null);
   });
 });
