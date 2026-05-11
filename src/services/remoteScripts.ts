@@ -1,10 +1,9 @@
 /**
- * Remote bash scripts that run on the SSH host.
+ * Bash scripts that run either on a remote SSH host or locally.
  *
- * These are the exact scripts that were previously embedded as heredocs
- * in the PowerShell files. They are unchanged — the remote host is always
- * Linux, so bash is the correct execution environment regardless of the
- * local operating system.
+ * These scripts are cross-platform: they detect the host OS (Linux, macOS,
+ * Windows via Git Bash) and adjust binary targets, archive formats, binary
+ * names, VS Code settings paths, and process management accordingly.
  */
 
 // ---------------------------------------------------------------------------
@@ -22,7 +21,7 @@ CONFIG_B64="\${CONFIG_B64:-}"
 TEST_URL="\${TEST_URL:-https://api.openai.com/v1/models}"
 TAIL_LINES="\${TAIL_LINES:-80}"
 
-BASE_DIR="$HOME/.codex-ssproxy"
+BASE_DIR="$HOME/.extensions-ssproxy"
 BIN_DIR="$BASE_DIR/bin"
 STATE_DIR="$BASE_DIR/state"
 LOG_DIR="$BASE_DIR/log"
@@ -32,13 +31,29 @@ MODE_FILE="$STATE_DIR/mode"
 URL_FILE="$STATE_DIR/server_url.txt"
 CFG_FILE="$STATE_DIR/config.json"
 LOG_FILE="$LOG_DIR/sslocal.log"
-SSLOCAL_BIN="$BIN_DIR/sslocal"
 PORT_FILE="$STATE_DIR/port"
+
+# Detect host OS for cross-platform support
+HOST_OS="linux"
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) HOST_OS="windows" ;;
+  Darwin) HOST_OS="macos" ;;
+esac
+
+# Set binary name based on OS
+if [ "$HOST_OS" = "windows" ]; then
+  SSLOCAL_BIN="$BIN_DIR/sslocal.exe"
+else
+  SSLOCAL_BIN="$BIN_DIR/sslocal"
+fi
+
 # Auto-detect VS Code settings path: remote (.vscode-server) vs local
 if [ -d "$HOME/.vscode-server" ]; then
   VSCODE_MACHINE_SETTINGS="$HOME/.vscode-server/data/Machine/settings.json"
-elif [ "$(uname)" = "Darwin" ]; then
+elif [ "$HOST_OS" = "macos" ]; then
   VSCODE_MACHINE_SETTINGS="$HOME/Library/Application Support/Code/User/settings.json"
+elif [ "$HOST_OS" = "windows" ]; then
+  VSCODE_MACHINE_SETTINGS="$APPDATA/Code/User/settings.json"
 else
   VSCODE_MACHINE_SETTINGS="$HOME/.config/Code/User/settings.json"
 fi
@@ -55,16 +70,46 @@ if [ "$ACTION" != "up" ] && [ -f "$PORT_FILE" ]; then
 fi
 
 log() {
-  printf '[%s][%s] %s\\n' "$(date +'%Y-%m-%d %H:%M:%S')" "$1" "$2"
+  printf '[%s][%s] %s\\n' "$(date +'%Y-%m-%d %H:%M:%S')" "$1" "$2" >&2
+}
+
+# Find python — prefer python3 but fall back to python (Windows)
+find_python() {
+  if command -v python3 >/dev/null 2>&1; then
+    echo "python3"
+  elif command -v python >/dev/null 2>&1; then
+    echo "python"
+  else
+    log ERROR "python3 (or python) is required but not found."
+    return 1
+  fi
 }
 
 detect_target() {
-  local arch
+  local arch os_tag
   arch="$(uname -m)"
-  case "$arch" in
-    x86_64) echo "x86_64-unknown-linux-gnu" ;;
-    aarch64|arm64) echo "aarch64-unknown-linux-gnu" ;;
-    *) echo "unsupported:\${arch}" ;;
+  case "$HOST_OS" in
+    windows)
+      case "$arch" in
+        x86_64)       echo "x86_64-pc-windows-msvc" ;;
+        aarch64|arm64) echo "aarch64-pc-windows-msvc" ;;
+        *) echo "unsupported:\${arch}" ;;
+      esac
+      ;;
+    macos)
+      case "$arch" in
+        x86_64)       echo "x86_64-apple-darwin" ;;
+        aarch64|arm64) echo "aarch64-apple-darwin" ;;
+        *) echo "unsupported:\${arch}" ;;
+      esac
+      ;;
+    *)
+      case "$arch" in
+        x86_64)       echo "x86_64-unknown-linux-gnu" ;;
+        aarch64|arm64) echo "aarch64-unknown-linux-gnu" ;;
+        *) echo "unsupported:\${arch}" ;;
+      esac
+      ;;
   esac
 }
 
@@ -82,20 +127,39 @@ install_sslocal() {
     return 2
   fi
 
-  local archive url tmp
-  archive="shadowsocks-\${SS_VERSION}.\${target}.tar.xz"
+  local archive url tmp bin_name
+  if [ "$HOST_OS" = "windows" ]; then
+    archive="shadowsocks-\${SS_VERSION}.\${target}.zip"
+    bin_name="sslocal.exe"
+  else
+    archive="shadowsocks-\${SS_VERSION}.\${target}.tar.xz"
+    bin_name="sslocal"
+  fi
   url="https://github.com/shadowsocks/shadowsocks-rust/releases/download/\${SS_VERSION}/\${archive}"
   tmp="$(mktemp -d "$TMP_DIR/install.XXXXXX")"
 
   log INFO "Downloading $url"
   curl -fL --retry 3 --connect-timeout 15 "$url" -o "$tmp/$archive"
-  tar -xf "$tmp/$archive" -C "$tmp"
-  if [ ! -f "$tmp/sslocal" ]; then
-    log ERROR "sslocal not found in extracted archive."
+  if [ "$HOST_OS" = "windows" ]; then
+    unzip -o "$tmp/$archive" -d "$tmp" >/dev/null 2>&1 || {
+      log INFO "unzip not found, trying python zip extraction..."
+      local py_bin
+      py_bin="$(find_python)"
+      "$py_bin" -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" "$tmp/$archive" "$tmp"
+    }
+  else
+    tar -xf "$tmp/$archive" -C "$tmp"
+  fi
+  if [ ! -f "$tmp/$bin_name" ]; then
+    log ERROR "$bin_name not found in extracted archive."
     return 3
   fi
 
-  install -m 0755 "$tmp/sslocal" "$SSLOCAL_BIN"
+  if [ "$HOST_OS" = "windows" ]; then
+    cp "$tmp/$bin_name" "$SSLOCAL_BIN"
+  else
+    install -m 0755 "$tmp/$bin_name" "$SSLOCAL_BIN"
+  fi
   rm -rf "$tmp"
   log OK "Installed sslocal to $SSLOCAL_BIN"
   "$SSLOCAL_BIN" --version | head -n1 | sed 's/^/[sslocal-version] /'
@@ -103,6 +167,11 @@ install_sslocal() {
 
 is_port_in_use() {
   local port="$1"
+  if [ "$HOST_OS" = "windows" ]; then
+    # Windows netstat output format: "  TCP    0.0.0.0:1080  ..."
+    netstat -an 2>/dev/null | grep -qE "TCP.*[:.]$port " && return 0
+    return 1
+  fi
   if command -v ss >/dev/null 2>&1; then
     ss -tln 2>/dev/null | awk '{print $4}' | grep -qE "(:|^)$port$"
     return $?
@@ -139,7 +208,7 @@ is_running() {
   if [ -z "$pid" ]; then
     return 1
   fi
-  if ps -p "$pid" >/dev/null 2>&1; then
+  if kill -0 "$pid" 2>/dev/null; then
     return 0
   fi
   return 1
@@ -155,7 +224,7 @@ stop_sslocal() {
   pid="$(cat "$PID_FILE")"
   kill "$pid" >/dev/null 2>&1 || true
   sleep 1
-  if ps -p "$pid" >/dev/null 2>&1; then
+  if kill -0 "$pid" 2>/dev/null; then
     kill -9 "$pid" >/dev/null 2>&1 || true
   fi
   rm -f "$PID_FILE"
@@ -208,19 +277,33 @@ start_sslocal() {
   mode="$(cat "$MODE_FILE")"
   : > "$LOG_FILE"
 
+  # On Windows, convert MSYS paths to native Windows paths for the sslocal.exe binary
+  local cfg_path="$CFG_FILE"
+  local log_path="$LOG_FILE"
+  if [ "$HOST_OS" = "windows" ] && command -v cygpath >/dev/null 2>&1; then
+    cfg_path="$(cygpath -w "$CFG_FILE")"
+    log_path="$(cygpath -w "$LOG_FILE")"
+  fi
+
   if [ "$mode" = "server_url" ]; then
     local server_url
     server_url="$(cat "$URL_FILE")"
-    nohup "$SSLOCAL_BIN" -b "127.0.0.1:\${SOCKS_PORT}" --server-url "$server_url" >>"$LOG_FILE" 2>&1 &
+    nohup "$SSLOCAL_BIN" -b "127.0.0.1:\${SOCKS_PORT}" --server-url "$server_url" >>"$log_path" 2>&1 &
   else
-    nohup "$SSLOCAL_BIN" -c "$CFG_FILE" >>"$LOG_FILE" 2>&1 &
+    # Always pass -b to override the bind address from the config, so the
+    # auto-detected port (which may differ from the config) is actually used.
+    nohup "$SSLOCAL_BIN" -c "$cfg_path" -b "127.0.0.1:\${SOCKS_PORT}" >>"$log_path" 2>&1 &
   fi
 
   local pid
   pid="$!"
+  # On Windows (Git Bash), disown prevents SIGHUP on bash exit
+  if [ "$HOST_OS" = "windows" ]; then
+    disown "$pid" 2>/dev/null || true
+  fi
   echo "$pid" > "$PID_FILE"
-  sleep 1
-  if ps -p "$pid" >/dev/null 2>&1; then
+  sleep 2
+  if kill -0 "$pid" 2>/dev/null; then
     log OK "sslocal started (pid=$pid), socks=127.0.0.1:\${SOCKS_PORT}"
   else
     log ERROR "sslocal failed to start. Last log lines:"
@@ -233,7 +316,9 @@ set_vscode_proxy() {
   local mode="$1"
   local proxy_url="$2"
 
-  python3 - "$VSCODE_MACHINE_SETTINGS" "$mode" "$proxy_url" <<'PY'
+  local py_bin
+  py_bin="$(find_python)"
+  "$py_bin" - "$VSCODE_MACHINE_SETTINGS" "$mode" "$proxy_url" <<'PY'
 import json
 import pathlib
 import re
@@ -329,7 +414,9 @@ PY
 }
 
 show_proxy_state() {
-  python3 - "$VSCODE_MACHINE_SETTINGS" <<'PY'
+  local py_bin
+  py_bin="$(find_python)"
+  "$py_bin" - "$VSCODE_MACHINE_SETTINGS" <<'PY'
 import json
 import pathlib
 import re
@@ -474,7 +561,7 @@ SOCKS_PORT="\${SOCKS_PORT:-1080}"
 TAIL_LINES="\${TAIL_LINES:-80}"
 REMOVE_ALL_STATE="\${REMOVE_ALL_STATE:-0}"
 
-BASE_DIR="$HOME/.codex-ssproxy"
+BASE_DIR="$HOME/.extensions-ssproxy"
 BIN_DIR="$BASE_DIR/bin"
 STATE_DIR="$BASE_DIR/state"
 LOG_DIR="$BASE_DIR/log"
@@ -485,11 +572,26 @@ CFG_FILE="$STATE_DIR/config.json"
 LOG_FILE="$LOG_DIR/sslocal.log"
 SSLOCAL_BIN="$BIN_DIR/sslocal"
 PORT_FILE="$STATE_DIR/port"
+
+# Detect host OS for cross-platform support
+HOST_OS="linux"
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) HOST_OS="windows" ;;
+  Darwin) HOST_OS="macos" ;;
+esac
+
+# Set binary name based on OS
+if [ "$HOST_OS" = "windows" ]; then
+  SSLOCAL_BIN="$BIN_DIR/sslocal.exe"
+fi
+
 # Auto-detect VS Code settings path: remote (.vscode-server) vs local
 if [ -d "$HOME/.vscode-server" ]; then
   VSCODE_MACHINE_SETTINGS="$HOME/.vscode-server/data/Machine/settings.json"
-elif [ "$(uname)" = "Darwin" ]; then
+elif [ "$HOST_OS" = "macos" ]; then
   VSCODE_MACHINE_SETTINGS="$HOME/Library/Application Support/Code/User/settings.json"
+elif [ "$HOST_OS" = "windows" ]; then
+  VSCODE_MACHINE_SETTINGS="$APPDATA/Code/User/settings.json"
 else
   VSCODE_MACHINE_SETTINGS="$HOME/.config/Code/User/settings.json"
 fi
@@ -503,7 +605,19 @@ if [ -f "$PORT_FILE" ]; then
 fi
 
 log() {
-  printf '[%s][%s] %s\\n' "$(date +'%Y-%m-%d %H:%M:%S')" "$1" "$2"
+  printf '[%s][%s] %s\\n' "$(date +'%Y-%m-%d %H:%M:%S')" "$1" "$2" >&2
+}
+
+# Find python — prefer python3 but fall back to python (Windows)
+find_python() {
+  if command -v python3 >/dev/null 2>&1; then
+    echo "python3"
+  elif command -v python >/dev/null 2>&1; then
+    echo "python"
+  else
+    log ERROR "python3 (or python) is required but not found."
+    return 1
+  fi
 }
 
 kill_known_pid() {
@@ -516,10 +630,10 @@ kill_known_pid() {
     rm -f "$PID_FILE"
     return 0
   fi
-  if ps -p "$pid" >/dev/null 2>&1; then
+  if kill -0 "$pid" 2>/dev/null; then
     kill "$pid" >/dev/null 2>&1 || true
     sleep 1
-    if ps -p "$pid" >/dev/null 2>&1; then
+    if kill -0 "$pid" 2>/dev/null; then
       kill -9 "$pid" >/dev/null 2>&1 || true
     fi
     log OK "Stopped sslocal from pid file (pid=$pid)"
@@ -550,7 +664,9 @@ kill_stray_processes() {
 }
 
 set_vscode_proxy_disable() {
-  python3 - "$VSCODE_MACHINE_SETTINGS" <<'PY'
+  local py_bin
+  py_bin="$(find_python)"
+  "$py_bin" - "$VSCODE_MACHINE_SETTINGS" <<'PY'
 import json
 import pathlib
 import re
@@ -639,7 +755,7 @@ show_status() {
   if [ -f "$PID_FILE" ]; then
     local pid
     pid="$(cat "$PID_FILE" 2>/dev/null || true)"
-    if [ -n "$pid" ] && ps -p "$pid" >/dev/null 2>&1; then
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
       log WARN "sslocal still appears running (pid=$pid)"
     else
       log OK "sslocal is not running."

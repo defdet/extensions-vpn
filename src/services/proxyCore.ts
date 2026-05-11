@@ -135,16 +135,16 @@ export function normalizeProxyError(error: unknown): { code: ErrorCode; message:
       message: "Access key validation failed. Reconfigure key and retry."
     };
   }
-  if (lower.includes("python3") || lower.includes("curl") || lower.includes("unsupported architecture")) {
-    return {
-      code: "MissingDependencyError",
-      message: "Remote host is missing required dependencies (python3/curl/compatible architecture)."
-    };
-  }
   if (lower.includes("failed to start") || lower.includes("proxy test curl failed")) {
     return {
       code: "ProxyStartError",
       message: "Proxy could not start or pass health check. Check output logs for details."
+    };
+  }
+  if (lower.includes("python") && lower.includes("not found") || lower.includes("curl: command not found") || lower.includes("unsupported architecture")) {
+    return {
+      code: "MissingDependencyError",
+      message: "Remote host is missing required dependencies (python/curl/compatible architecture)."
     };
   }
   if (lower.includes("proxy") && lower.includes("settings")) {
