@@ -12,6 +12,7 @@ import {
   parseEndpoint,
   parseYamlLikePayload
 } from "../services/accessKeyResolver";
+import { SETUP_REMOTE_SCRIPT } from "../services/remoteScripts";
 
 suite("Proxy Core Unit", () => {
   test("buildSecretKey uses per-authority namespace", () => {
@@ -51,6 +52,26 @@ suite("Proxy Core Unit", () => {
   test("normalizeProxyError maps auth failures", () => {
     const out = normalizeProxyError(new Error("Failed to fetch URL: test"));
     assert.equal(out.code, "AuthKeyError");
+  });
+});
+
+suite("Remote Script Unit", () => {
+  test("port detection probes localhost bind before command fallbacks", () => {
+    const probeIndex = SETUP_REMOTE_SCRIPT.indexOf("probe_port_with_python");
+    const ssIndex = SETUP_REMOTE_SCRIPT.indexOf("command -v ss");
+
+    assert.ok(probeIndex >= 0);
+    assert.ok(ssIndex > probeIndex);
+    assert.ok(SETUP_REMOTE_SCRIPT.includes('sock.bind(("127.0.0.1", port))'));
+    assert.ok(SETUP_REMOTE_SCRIPT.includes("errno.EADDRINUSE"));
+    assert.ok(SETUP_REMOTE_SCRIPT.includes('probe_port_with_python "$port" || probe_rc=$?'));
+  });
+
+  test("config mode writes selected port into launch config instead of passing -b", () => {
+    assert.ok(SETUP_REMOTE_SCRIPT.includes("write_launch_config"));
+    assert.ok(SETUP_REMOTE_SCRIPT.includes('data["local_port"] = port'));
+    assert.ok(SETUP_REMOTE_SCRIPT.includes('nohup "$SSLOCAL_BIN" -c "$cfg_path" >>"$log_path" 2>&1 &'));
+    assert.ok(!SETUP_REMOTE_SCRIPT.includes('-c "$cfg_path" -b "127.0.0.1:${SOCKS_PORT}"'));
   });
 });
 

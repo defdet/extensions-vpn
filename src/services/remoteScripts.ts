@@ -30,6 +30,7 @@ PID_FILE="$STATE_DIR/sslocal.pid"
 MODE_FILE="$STATE_DIR/mode"
 URL_FILE="$STATE_DIR/server_url.txt"
 CFG_FILE="$STATE_DIR/config.json"
+LAUNCH_CFG_FILE="$STATE_DIR/launch_config.json"
 LOG_FILE="$LOG_DIR/sslocal.log"
 PORT_FILE="$STATE_DIR/port"
 
@@ -165,8 +166,48 @@ install_sslocal() {
   "$SSLOCAL_BIN" --version | head -n1 | sed 's/^/[sslocal-version] /'
 }
 
+probe_port_with_python() {
+  local port="$1"
+  local py_bin=""
+  if command -v python3 >/dev/null 2>&1; then
+    py_bin="python3"
+  elif command -v python >/dev/null 2>&1; then
+    py_bin="python"
+  else
+    return 2
+  fi
+
+  "$py_bin" - "$port" <<'PY'
+import errno
+import socket
+import sys
+
+port = int(sys.argv[1])
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+try:
+    sock.bind(("127.0.0.1", port))
+except OSError as exc:
+    if exc.errno in (errno.EADDRINUSE, errno.EACCES):
+        raise SystemExit(0)
+    raise SystemExit(2)
+finally:
+    sock.close()
+
+raise SystemExit(1)
+PY
+}
+
 is_port_in_use() {
   local port="$1"
+  local probe_rc=0
+  probe_port_with_python "$port" || probe_rc=$?
+  if [ "$probe_rc" -eq 0 ]; then
+    return 0
+  fi
+  if [ "$probe_rc" -eq 1 ]; then
+    return 1
+  fi
+
   if [ "$HOST_OS" = "windows" ]; then
     # Windows netstat output format: "  TCP    0.0.0.0:1080  ..."
     netstat -an 2>/dev/null | grep -qE "TCP.*[:.]$port " && return 0
@@ -258,6 +299,36 @@ write_runtime_files() {
   return 12
 }
 
+write_launch_config() {
+  local py_bin
+  py_bin="$(find_python)"
+  "$py_bin" - "$CFG_FILE" "$LAUNCH_CFG_FILE" "$SOCKS_PORT" <<'PY'
+import json
+import pathlib
+import sys
+
+source = pathlib.Path(sys.argv[1])
+target = pathlib.Path(sys.argv[2])
+port = int(sys.argv[3])
+
+data = json.loads(source.read_text(encoding="utf-8"))
+if not isinstance(data, dict):
+    raise SystemExit("config root must be a JSON object")
+
+if isinstance(data.get("locals"), list):
+    for local in data["locals"]:
+        if isinstance(local, dict):
+            local["local_address"] = "127.0.0.1"
+            local["local_port"] = port
+else:
+    data["local_address"] = "127.0.0.1"
+    data["local_port"] = port
+
+target.write_text(json.dumps(data, ensure_ascii=True, indent=2, sort_keys=True) + "\\n", encoding="utf-8")
+PY
+  log INFO "Prepared launch config with socks=127.0.0.1:$SOCKS_PORT"
+}
+
 start_sslocal() {
   install_sslocal
   write_runtime_files
@@ -277,11 +348,15 @@ start_sslocal() {
   mode="$(cat "$MODE_FILE")"
   : > "$LOG_FILE"
 
+  if [ "$mode" = "config" ]; then
+    write_launch_config
+  fi
+
   # On Windows, convert MSYS paths to native Windows paths for the sslocal.exe binary
-  local cfg_path="$CFG_FILE"
+  local cfg_path="$LAUNCH_CFG_FILE"
   local log_path="$LOG_FILE"
   if [ "$HOST_OS" = "windows" ] && command -v cygpath >/dev/null 2>&1; then
-    cfg_path="$(cygpath -w "$CFG_FILE")"
+    cfg_path="$(cygpath -w "$LAUNCH_CFG_FILE")"
     log_path="$(cygpath -w "$LOG_FILE")"
   fi
 
@@ -290,9 +365,7 @@ start_sslocal() {
     server_url="$(cat "$URL_FILE")"
     nohup "$SSLOCAL_BIN" -b "127.0.0.1:\${SOCKS_PORT}" --server-url "$server_url" >>"$log_path" 2>&1 &
   else
-    # Always pass -b to override the bind address from the config, so the
-    # auto-detected port (which may differ from the config) is actually used.
-    nohup "$SSLOCAL_BIN" -c "$cfg_path" -b "127.0.0.1:\${SOCKS_PORT}" >>"$log_path" 2>&1 &
+    nohup "$SSLOCAL_BIN" -c "$cfg_path" >>"$log_path" 2>&1 &
   fi
 
   local pid
@@ -569,6 +642,7 @@ PID_FILE="$STATE_DIR/sslocal.pid"
 MODE_FILE="$STATE_DIR/mode"
 URL_FILE="$STATE_DIR/server_url.txt"
 CFG_FILE="$STATE_DIR/config.json"
+LAUNCH_CFG_FILE="$STATE_DIR/launch_config.json"
 LOG_FILE="$LOG_DIR/sslocal.log"
 SSLOCAL_BIN="$BIN_DIR/sslocal"
 PORT_FILE="$STATE_DIR/port"
@@ -780,7 +854,7 @@ kill_known_pid
 kill_stray_processes
 set_vscode_proxy_disable
 
-rm -f "$SSLOCAL_BIN" "$MODE_FILE" "$URL_FILE" "$CFG_FILE" "$PORT_FILE" >/dev/null 2>&1 || true
+rm -f "$SSLOCAL_BIN" "$MODE_FILE" "$URL_FILE" "$CFG_FILE" "$LAUNCH_CFG_FILE" "$PORT_FILE" >/dev/null 2>&1 || true
 
 if [ "$REMOVE_ALL_STATE" = "1" ]; then
   rm -rf "$BASE_DIR" >/dev/null 2>&1 || true
