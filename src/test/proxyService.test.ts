@@ -219,3 +219,12 @@ suite("Local Execution Unit", () => {
     }
   });
 });
+
+suite("SSH Runner Unit", () => {
+  const { buildSshArgs } = require("../services/sshRunner") as typeof import("../services/sshRunner");
+
+  test("buildSshArgs clears configured forwards", () => {
+    const args = buildSshArgs("gpu_polymer_2", "bash -s");
+    assert.deepEqual(args, ["-o", "ClearAllForwardings=yes", "gpu_polymer_2", "bash -s"]);
+  });
+});

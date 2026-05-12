@@ -13,6 +13,22 @@ export interface SshRunResult {
 }
 
 /**
+ * Build SSH CLI args for non-interactive remote script execution.
+ *
+ * We explicitly clear configured forwards so actions triggered inside an
+ * existing Remote-SSH session do not fail by trying to bind duplicate local
+ * ports from ~/.ssh/config.
+ */
+export function buildSshArgs(sshHost: string, remoteCommand: string): string[] {
+  return [
+    "-o",
+    "ClearAllForwardings=yes",
+    sshHost,
+    remoteCommand,
+  ];
+}
+
+/**
  * Find the SSH executable on the local machine.
  * Windows: prefer the built-in OpenSSH, then fall back to PATH.
  * Linux/macOS: just use ssh from PATH.
@@ -67,7 +83,7 @@ export function runRemoteScript(
 
   const cleanScript = script.replace(/\r/g, "");
 
-  const proc = cp.spawn(sshBin, [sshHost, remoteCommand], {
+  const proc = cp.spawn(sshBin, buildSshArgs(sshHost, remoteCommand), {
     shell: false,
     stdio: ["pipe", "pipe", "pipe"],
   });
