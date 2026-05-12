@@ -102,6 +102,11 @@
           "default": "https://api.openai.com/v1/models",
           "description": "URL used by test connectivity action."
         },
+        "remoteProxy.testExpectedHttpCodes": {
+          "type": "string",
+          "default": "200,204,301,302,307,308,401,403",
+          "description": "Comma-separated HTTP codes considered successful by connectivity test."
+        },
         "remoteProxy.logTailLines": {
           "type": "number",
           "default": 80,
@@ -111,7 +116,7 @@
         },
         "remoteProxy.confirmBeforeMutations": {
           "type": "boolean",
-          "default": true,
+          "default": false,
           "description": "Require confirmation before enable, disable, and reinstall actions."
         },
         "remoteProxy.clusterProfile": {

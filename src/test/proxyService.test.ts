@@ -49,6 +49,20 @@ suite("Proxy Core Unit", () => {
     assert.equal(patch.proxyState, "enabled");
   });
 
+  test("deriveStatusPatch detects running state from sslocal listener log", () => {
+    const patch = deriveStatusPatch([
+      "2026-05-12T16:41:25.672805187+03:00  INFO shadowsocks socks TCP listening on 127.0.0.1:1081"
+    ]);
+    assert.equal(patch.runningState, "on");
+  });
+
+  test("deriveStatusPatch handles proxy-state with double quotes", () => {
+    const patch = deriveStatusPatch([
+      '[proxy-state] {"http.proxy":"socks5://127.0.0.1:1081","http.proxySupport":"on"}'
+    ]);
+    assert.equal(patch.proxyState, "enabled");
+  });
+
   test("normalizeProxyError maps auth failures", () => {
     const out = normalizeProxyError(new Error("Failed to fetch URL: test"));
     assert.equal(out.code, "AuthKeyError");
@@ -72,6 +86,19 @@ suite("Remote Script Unit", () => {
     assert.ok(SETUP_REMOTE_SCRIPT.includes('data["local_port"] = port'));
     assert.ok(SETUP_REMOTE_SCRIPT.includes('nohup "$SSLOCAL_BIN" -c "$cfg_path" >>"$log_path" 2>&1 &'));
     assert.ok(!SETUP_REMOTE_SCRIPT.includes('-c "$cfg_path" -b "127.0.0.1:${SOCKS_PORT}"'));
+  });
+
+  test("test action retries curl and refreshes status output", () => {
+    assert.ok(SETUP_REMOTE_SCRIPT.includes("--retry 2"));
+    assert.ok(SETUP_REMOTE_SCRIPT.includes("--retry-connrefused"));
+    assert.ok(SETUP_REMOTE_SCRIPT.includes("status_sslocal"));
+  });
+
+  test("test action supports configurable expected HTTP status codes", () => {
+    assert.ok(SETUP_REMOTE_SCRIPT.includes("TEST_EXPECTED_HTTP_CODES"));
+    assert.ok(SETUP_REMOTE_SCRIPT.includes("is_expected_http_code"));
+    assert.ok(SETUP_REMOTE_SCRIPT.includes('http_code="$(curl'));
+    assert.ok(SETUP_REMOTE_SCRIPT.includes('[ "$http_code" != "000" ]'));
   });
 });
 

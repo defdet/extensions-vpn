@@ -44,8 +44,9 @@ Or in VS Code: **Extensions** → `⋯` menu → **Install from VSIX…**
 | `remoteProxy.socksPort` | `1080` | SOCKS bind port on remote |
 | `remoteProxy.shadowsocksVersion` | `v1.24.0` | sslocal release version |
 | `remoteProxy.testUrl` | `https://api.openai.com/v1/models` | URL for connectivity test |
+| `remoteProxy.testExpectedHttpCodes` | `200,204,301,302,307,308,401,403` | Comma-separated HTTP codes treated as successful |
 | `remoteProxy.logTailLines` | `80` | Number of log lines to fetch |
-| `remoteProxy.confirmBeforeMutations` | `true` | Ask before enable/disable/reinstall |
+| `remoteProxy.confirmBeforeMutations` | `false` | Ask before enable/disable/reinstall |
 
 ## How It Works
 

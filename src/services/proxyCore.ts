@@ -84,16 +84,26 @@ export function deriveStatusPatch(lines: string[]): Partial<ProxyStatusSnapshot>
   let runningState: RunningState | undefined;
   let proxyState: ProxySettingsState | undefined;
   for (const line of lines) {
-    if (/sslocal is running/iu.test(line) || /started \(pid=/iu.test(line)) {
+    if (
+      /sslocal is running/iu.test(line) ||
+      /started \(pid=/iu.test(line) ||
+      /shadowsocks\s+socks\s+tcp\s+listening\s+on\s+/iu.test(line)
+    ) {
       runningState = "on";
     } else if (/sslocal is not running/iu.test(line) || /Stopped sslocal/iu.test(line)) {
       runningState = "off";
     }
 
     if (line.includes("[proxy-state]") || line.includes("[proxy-after]")) {
-      if (/proxySupport[']?\s*:\s*[']on[']/iu.test(line)) {
+      if (/proxySupport['"]?\s*:\s*['"]on['"]/iu.test(line)) {
         proxyState = "enabled";
-      } else if (/proxySupport[']?\s*:\s*[']off[']/iu.test(line)) {
+      } else if (/proxySupport['"]?\s*:\s*['"]off['"]/iu.test(line)) {
+        proxyState = "disabled";
+      }
+
+      if (/http\.proxy['"]?\s*:\s*['"]socks5:\/\/127\.0\.0\.1:\d+['"]/iu.test(line)) {
+        proxyState = "enabled";
+      } else if (/http\.proxy['"]?\s*:\s*['"]\s*['"]/iu.test(line)) {
         proxyState = "disabled";
       }
     }

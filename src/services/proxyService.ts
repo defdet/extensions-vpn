@@ -27,6 +27,7 @@ interface RemoteProxyConfig {
   socksPort: number;
   shadowsocksVersion: string;
   testUrl: string;
+  testExpectedHttpCodes: string;
   logTailLines: number;
   confirmBeforeMutations: boolean;
   clusterProfile: ClusterProfileType;
@@ -343,8 +344,9 @@ export class ProxyService {
       socksPort: cfg.get<number>("socksPort", 1080),
       shadowsocksVersion: `${cfg.get<string>("shadowsocksVersion", "v1.24.0")}`.trim(),
       testUrl: `${cfg.get<string>("testUrl", "https://api.openai.com/v1/models")}`.trim(),
+      testExpectedHttpCodes: `${cfg.get<string>("testExpectedHttpCodes", "200,204,301,302,307,308,401,403")}`.trim(),
       logTailLines: cfg.get<number>("logTailLines", 80),
-      confirmBeforeMutations: cfg.get<boolean>("confirmBeforeMutations", true),
+      confirmBeforeMutations: cfg.get<boolean>("confirmBeforeMutations", false),
       clusterProfile: cfg.get<ClusterProfileType>("clusterProfile", "direct"),
       dockerContainer: `${cfg.get<string>("dockerContainer", "")}`.trim(),
       customCommandTemplate: `${cfg.get<string>("customCommandTemplate", "")}`.trim(),
@@ -453,6 +455,7 @@ export class ProxyService {
       SOCKS_PORT: `${cfg.socksPort}`,
       SS_VERSION: cfg.shadowsocksVersion,
       TEST_URL: cfg.testUrl,
+      TEST_EXPECTED_HTTP_CODES: cfg.testExpectedHttpCodes,
       TAIL_LINES: `${cfg.logTailLines}`,
     };
     if (runtime) {

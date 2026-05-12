@@ -19,6 +19,7 @@ RUNTIME_MODE="\${RUNTIME_MODE:-}"
 SERVER_URL_B64="\${SERVER_URL_B64:-}"
 CONFIG_B64="\${CONFIG_B64:-}"
 TEST_URL="\${TEST_URL:-https://api.openai.com/v1/models}"
+TEST_EXPECTED_HTTP_CODES="\${TEST_EXPECTED_HTTP_CODES:-200,204,301,302,307,308,401,403}"
 TAIL_LINES="\${TAIL_LINES:-80}"
 
 BASE_DIR="$HOME/.extensions-ssproxy"
@@ -183,7 +184,10 @@ import socket
 import sys
 
 port = int(sys.argv[1])
-sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+try:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+except OSError:
+    raise SystemExit(2)
 try:
     sock.bind(("127.0.0.1", port))
 except OSError as exc:
@@ -241,16 +245,27 @@ find_available_port() {
 }
 
 is_running() {
-  if [ ! -f "$PID_FILE" ]; then
-    return 1
+  local pid=""
+  if [ -f "$PID_FILE" ]; then
+    pid="$(cat "$PID_FILE" 2>/dev/null || true)"
   fi
-  local pid
-  pid="$(cat "$PID_FILE" 2>/dev/null || true)"
-  if [ -z "$pid" ]; then
-    return 1
-  fi
-  if kill -0 "$pid" 2>/dev/null; then
+
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
     return 0
+  fi
+
+  # Fallback: if pid file is stale but the expected listener is alive, treat as running.
+  if is_port_in_use "$SOCKS_PORT"; then
+    if [ -n "$pid" ]; then
+      log WARN "PID $pid is not alive, but port $SOCKS_PORT is in use; recovering runtime state."
+    else
+      log WARN "No pid file found, but port $SOCKS_PORT is in use; recovering runtime state."
+    fi
+    return 0
+  fi
+
+  if [ -n "$pid" ]; then
+    rm -f "$PID_FILE"
   fi
   return 1
 }
@@ -261,15 +276,59 @@ stop_sslocal() {
     rm -f "$PID_FILE"
     return 0
   fi
-  local pid
-  pid="$(cat "$PID_FILE")"
-  kill "$pid" >/dev/null 2>&1 || true
-  sleep 1
-  if kill -0 "$pid" 2>/dev/null; then
-    kill -9 "$pid" >/dev/null 2>&1 || true
+
+  local pid=""
+  if [ -f "$PID_FILE" ]; then
+    pid="$(cat "$PID_FILE" 2>/dev/null || true)"
   fi
+
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" >/dev/null 2>&1 || true
+    sleep 1
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -9 "$pid" >/dev/null 2>&1 || true
+    fi
+    rm -f "$PID_FILE"
+    log OK "Stopped sslocal (pid=$pid)"
+    return 0
+  fi
+
+  # Fallback for stale / missing pid file: terminate matching processes.
+  if command -v pgrep >/dev/null 2>&1; then
+    local pids
+    pids="$(pgrep -f "$SSLOCAL_BIN" || true)"
+    if [ -n "$pids" ]; then
+      local spid
+      for spid in $pids; do
+        kill "$spid" >/dev/null 2>&1 || true
+      done
+      sleep 1
+      pids="$(pgrep -f "$SSLOCAL_BIN" || true)"
+      if [ -n "$pids" ]; then
+        for spid in $pids; do
+          kill -9 "$spid" >/dev/null 2>&1 || true
+        done
+      fi
+      rm -f "$PID_FILE"
+      log OK "Stopped sslocal via process scan."
+      return 0
+    fi
+  fi
+
   rm -f "$PID_FILE"
-  log OK "Stopped sslocal (pid=$pid)"
+  log WARN "sslocal was reported running but no managed process could be terminated."
+}
+
+is_expected_http_code() {
+  local code="$1"
+  local token raw
+  for raw in $(printf '%s' "$TEST_EXPECTED_HTTP_CODES" | tr ',' ' '); do
+    token="$(printf '%s' "$raw" | tr -d '[:space:]')"
+    if [ -n "$token" ] && [ "$token" = "$code" ]; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 write_runtime_files() {
@@ -556,9 +615,15 @@ PY
 
 status_sslocal() {
   if is_running; then
-    local pid
-    pid="$(cat "$PID_FILE")"
-    log OK "sslocal is running (pid=$pid)"
+    local pid=""
+    if [ -f "$PID_FILE" ]; then
+      pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+    fi
+    if [ -n "$pid" ]; then
+      log OK "sslocal is running (pid=$pid)"
+    else
+      log OK "sslocal appears to be running (pid unavailable)"
+    fi
   else
     log INFO "sslocal is not running."
   fi
@@ -572,17 +637,56 @@ status_sslocal() {
 }
 
 test_proxy() {
-  local rc
-  log INFO "Testing proxy with curl via socks5-hostname: $TEST_URL"
-  set +e
-  curl -sS -o /dev/null -w "http_code=%{http_code}\\n" --connect-timeout 12 --socks5-hostname "127.0.0.1:\${SOCKS_PORT}" "$TEST_URL"
-  rc=$?
-  set -e
-  if [ $rc -ne 0 ]; then
-    log ERROR "Proxy test curl failed (rc=$rc)"
-    return $rc
+  local rc=0
+  local attempt=1
+  local max_attempts=3
+  local http_code=""
+
+  if ! is_running; then
+    log ERROR "Proxy test aborted: sslocal is not running."
+    return 30
   fi
-  log OK "Proxy test command completed."
+
+  log INFO "Expected HTTP codes: $TEST_EXPECTED_HTTP_CODES"
+
+  while [ "$attempt" -le "$max_attempts" ]; do
+    log INFO "Testing proxy with curl via socks5-hostname: $TEST_URL (attempt $attempt/$max_attempts)"
+    set +e
+    http_code="$(curl -sS -o /dev/null -w "%{http_code}" \
+      --connect-timeout 12 \
+      --max-time 20 \
+      --retry 2 \
+      --retry-connrefused \
+      --retry-delay 1 \
+      --socks5-hostname "127.0.0.1:\${SOCKS_PORT}" \
+      "$TEST_URL")"
+    rc=$?
+    set -e
+    if [ $rc -eq 0 ] && [ "$http_code" != "000" ]; then
+      log INFO "http_code=$http_code"
+      if is_expected_http_code "$http_code"; then
+        log OK "Proxy test command completed."
+        return 0
+      fi
+      log WARN "HTTP code $http_code is not in expected set ($TEST_EXPECTED_HTTP_CODES)."
+      rc=41
+    else
+      if [ -n "$http_code" ]; then
+        log INFO "http_code=$http_code"
+      fi
+    fi
+
+    log WARN "Proxy test curl failed (rc=$rc) on attempt $attempt/$max_attempts."
+    if [ "$attempt" -lt "$max_attempts" ]; then
+      sleep 1
+    fi
+    attempt=$((attempt + 1))
+  done
+
+  log ERROR "Proxy test failed after $max_attempts attempts (last rc=$rc)."
+  log INFO "Recent sslocal log tail for diagnostics:"
+  tail -n 30 "$LOG_FILE" 2>/dev/null || true
+  return $rc
 }
 
 show_logs() {
@@ -614,6 +718,7 @@ case "$ACTION" in
     ;;
   test)
     test_proxy
+    status_sslocal
     ;;
   logs)
     show_logs
