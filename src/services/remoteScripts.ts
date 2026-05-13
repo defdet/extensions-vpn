@@ -96,7 +96,7 @@ find_python() {
   elif command -v python >/dev/null 2>&1; then
     echo "python"
   else
-    log ERROR "python3 (or python) is required but not found."
+    log ERROR "python3 (or python) is required but not found." >&2
     return 1
   fi
 }
@@ -241,6 +241,10 @@ is_port_in_use() {
 }
 
 find_available_port() {
+  # Caller captures the chosen port via $(find_available_port ...), so anything
+  # this function writes to stdout becomes part of the captured value. Route
+  # status/error lines to stderr so they reach the SSH client without polluting
+  # the captured port number.
   local port="$1"
   local skip="\${2:-}"
   local max_attempts=20
@@ -250,11 +254,11 @@ find_available_port() {
       echo "$port"
       return 0
     fi
-    log INFO "Port $port is unavailable, trying next..."
+    log INFO "Port $port is unavailable, trying next..." >&2
     port=$((port + 1))
     attempt=$((attempt + 1))
   done
-  log ERROR "Could not find an available port after $max_attempts attempts (starting from $1)"
+  log ERROR "Could not find an available port after $max_attempts attempts (starting from $1)" >&2
   return 1
 }
 
@@ -887,15 +891,20 @@ test_proxy() {
       fi
       rc=$?
       set -e
-      if [ $rc -eq 0 ] && [ "$http_code" != "000" ]; then
+      # If curl reported a real HTTP code (not 000), trust it even when rc != 0:
+      # the response was received even if the connection later timed out
+      # (--max-time). On high-latency hosts this is the difference between
+      # "proxy works but is slow" and "test rejects working proxies".
+      if [ -n "$http_code" ] && [ "$http_code" != "000" ]; then
         log INFO "\${label}_http_code=$http_code"
         if is_expected_http_code "$http_code"; then
+          if [ "$rc" -ne 0 ]; then
+            log WARN "$label proxy returned $http_code but curl exited rc=$rc (likely slow upstream). Treating as success."
+          fi
           return 0
         fi
         log WARN "$label HTTP code $http_code is not in expected set ($TEST_EXPECTED_HTTP_CODES)."
         rc=41
-      elif [ -n "$http_code" ]; then
-        log INFO "\${label}_http_code=$http_code"
       fi
       log WARN "$label proxy test curl failed (rc=$rc) on attempt $attempt/$max_attempts."
       [ "$attempt" -lt "$max_attempts" ] && sleep 1
@@ -1043,7 +1052,7 @@ find_python() {
   elif command -v python >/dev/null 2>&1; then
     echo "python"
   else
-    log ERROR "python3 (or python) is required but not found."
+    log ERROR "python3 (or python) is required but not found." >&2
     return 1
   fi
 }
