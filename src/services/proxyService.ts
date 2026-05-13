@@ -25,6 +25,7 @@ const LAST_HOST_KEY = "remoteProxy.lastSshHost";
 interface RemoteProxyConfig {
   sshHost: string;
   socksPort: number;
+  httpPort: number;
   shadowsocksVersion: string;
   testUrl: string;
   testExpectedHttpCodes: string;
@@ -33,6 +34,7 @@ interface RemoteProxyConfig {
   clusterProfile: ClusterProfileType;
   dockerContainer: string;
   customCommandTemplate: string;
+  wrapClaudeCode: boolean;
 }
 
 interface ScriptRunResult {
@@ -110,10 +112,16 @@ export class ProxyService {
     const cfg = this.getConfig();
     await this.executeWithStatus(authority, "enable", async () => {
       this.output.appendLine("[INFO] Resolving access key payload...");
-      const runtime = await resolveAccessKey(key, cfg.socksPort);
+      const runtime = await resolveAccessKey(key);
       this.output.appendLine(`[OK] Key resolved via ${runtime.source}. ${runtime.summary}`);
       await this.runSetupAction("up", host, cfg, runtime, key, isLocal);
-      await vscode.window.showInformationMessage("Proxy enabled. Reload the window (Ctrl+Shift+P → Reload Window) to apply.");
+      const claudeHint = cfg.wrapClaudeCode
+        ? " If a Claude Code session is open, close and reopen it (or reload the window) so the wrapped 'claude' binary is used."
+        : "";
+      const applyHint = isLocal
+        ? `Reload the window (Ctrl+Shift+P → Reload Window) to apply.${claudeHint}`
+        : `Reload the window to apply http.proxy and terminal env. For extensions whose subprocesses must also be proxied, run 'Remote-SSH: Kill VS Code Server on Host' and reconnect so server-env-setup is sourced.${claudeHint}`;
+      await vscode.window.showInformationMessage(`Proxy enabled. ${applyHint}`);
     });
   }
 
@@ -342,6 +350,7 @@ export class ProxyService {
     return {
       sshHost: `${cfg.get<string>("sshHost", "")}`.trim(),
       socksPort: cfg.get<number>("socksPort", 1080),
+      httpPort: cfg.get<number>("httpPort", 1081),
       shadowsocksVersion: `${cfg.get<string>("shadowsocksVersion", "v1.24.0")}`.trim(),
       testUrl: `${cfg.get<string>("testUrl", "https://api.openai.com/v1/models")}`.trim(),
       testExpectedHttpCodes: `${cfg.get<string>("testExpectedHttpCodes", "200,204,301,302,307,308,401,403")}`.trim(),
@@ -350,6 +359,7 @@ export class ProxyService {
       clusterProfile: cfg.get<ClusterProfileType>("clusterProfile", "direct"),
       dockerContainer: `${cfg.get<string>("dockerContainer", "")}`.trim(),
       customCommandTemplate: `${cfg.get<string>("customCommandTemplate", "")}`.trim(),
+      wrapClaudeCode: cfg.get<boolean>("wrapClaudeCode", true),
     };
   }
 
@@ -453,15 +463,15 @@ export class ProxyService {
     const envVars: Record<string, string> = {
       ACTION: action,
       SOCKS_PORT: `${cfg.socksPort}`,
+      HTTP_PORT: `${cfg.httpPort}`,
       SS_VERSION: cfg.shadowsocksVersion,
       TEST_URL: cfg.testUrl,
       TEST_EXPECTED_HTTP_CODES: cfg.testExpectedHttpCodes,
       TAIL_LINES: `${cfg.logTailLines}`,
+      WRAP_CLAUDE_CODE: cfg.wrapClaudeCode ? "1" : "0",
     };
     if (runtime) {
-      envVars.RUNTIME_MODE = runtime.mode;
-      envVars.SERVER_URL_B64 = runtime.serverUrlB64;
-      envVars.CONFIG_B64 = runtime.configB64;
+      envVars.SERVER_INFO_B64 = runtime.serverInfoB64;
     }
     const secrets = accessKey ? [accessKey] : [];
     return this.executeScript(host, SETUP_REMOTE_SCRIPT, envVars, secrets, isLocal);
@@ -474,6 +484,7 @@ export class ProxyService {
   ): Promise<ScriptRunResult> {
     const envVars: Record<string, string> = {
       SOCKS_PORT: `${cfg.socksPort}`,
+      HTTP_PORT: `${cfg.httpPort}`,
       TAIL_LINES: `${cfg.logTailLines}`,
       REMOVE_ALL_STATE: "0",
     };

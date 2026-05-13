@@ -2,9 +2,7 @@ import * as http from "node:http";
 import * as https from "node:https";
 
 export interface AccessKeyRuntime {
-  mode: "server_url" | "config";
-  serverUrlB64: string;
-  configB64: string;
+  serverInfoB64: string;
   source: string;
   summary: string;
 }
@@ -14,6 +12,89 @@ interface ConfigObj {
   server_port: number;
   password: string;
   method: string;
+}
+
+function decodeBase64Loose(value: string): string | null {
+  let v = value.trim().replace(/-/g, "+").replace(/_/g, "/");
+  while (v.length % 4 !== 0) {
+    v += "=";
+  }
+  try {
+    return Buffer.from(v, "base64").toString("utf-8");
+  } catch {
+    return null;
+  }
+}
+
+export function parseSsUrl(url: string): ConfigObj | null {
+  if (!url.startsWith("ss://")) {
+    return null;
+  }
+  let rest = url.substring(5);
+  const hashIdx = rest.indexOf("#");
+  if (hashIdx >= 0) {
+    rest = rest.substring(0, hashIdx);
+  }
+  const qIdx = rest.indexOf("?");
+  if (qIdx >= 0) {
+    rest = rest.substring(0, qIdx);
+  }
+  const slashIdx = rest.indexOf("/");
+  if (slashIdx >= 0) {
+    rest = rest.substring(0, slashIdx);
+  }
+  if (!rest) {
+    return null;
+  }
+
+  const atIdx = rest.lastIndexOf("@");
+  if (atIdx >= 0) {
+    // SIP002: base64(method:password)@host:port
+    const userInfo = rest.substring(0, atIdx);
+    const hostPort = rest.substring(atIdx + 1);
+    const decoded = decodeBase64Loose(userInfo);
+    if (decoded === null) {
+      return null;
+    }
+    const colon = decoded.indexOf(":");
+    if (colon < 0) {
+      return null;
+    }
+    const method = decoded.substring(0, colon);
+    const password = decoded.substring(colon + 1);
+    let ep: { host: string; port: number };
+    try {
+      ep = parseEndpoint(hostPort);
+    } catch {
+      return null;
+    }
+    return { server: ep.host, server_port: ep.port, method, password };
+  }
+
+  // Legacy: base64(method:password@host:port)
+  const decoded = decodeBase64Loose(rest);
+  if (decoded === null) {
+    return null;
+  }
+  const atIdx2 = decoded.lastIndexOf("@");
+  if (atIdx2 < 0) {
+    return null;
+  }
+  const credentials = decoded.substring(0, atIdx2);
+  const hostPort = decoded.substring(atIdx2 + 1);
+  const colon = credentials.indexOf(":");
+  if (colon < 0) {
+    return null;
+  }
+  const method = credentials.substring(0, colon);
+  const password = credentials.substring(colon + 1);
+  let ep: { host: string; port: number };
+  try {
+    ep = parseEndpoint(hostPort);
+  } catch {
+    return null;
+  }
+  return { server: ep.host, server_port: ep.port, method, password };
 }
 
 export function encodeBase64Utf8(text: string): string {
@@ -128,10 +209,21 @@ export function parseYamlLikePayload(payload: string): ConfigObj | null {
   };
 }
 
-export async function resolveAccessKey(
-  key: string,
-  socksPort: number
-): Promise<AccessKeyRuntime> {
+function buildRuntime(configObj: ConfigObj, source: string): AccessKeyRuntime {
+  const serverInfo = JSON.stringify({
+    server: configObj.server,
+    server_port: configObj.server_port,
+    password: configObj.password,
+    method: configObj.method,
+  });
+  return {
+    serverInfoB64: encodeBase64Utf8(serverInfo),
+    source,
+    summary: `server=${configObj.server}:${configObj.server_port}, method=${configObj.method}`,
+  };
+}
+
+export async function resolveAccessKey(key: string): Promise<AccessKeyRuntime> {
   if (!key || !key.trim()) {
     throw new Error("Access key is empty.");
   }
@@ -140,13 +232,11 @@ export async function resolveAccessKey(
 
   // Direct ss:// URL
   if (trimmed.startsWith("ss://")) {
-    return {
-      mode: "server_url",
-      serverUrlB64: encodeBase64Utf8(trimmed),
-      configB64: "",
-      source: "inline-ss-url",
-      summary: "Resolved as direct ss:// URL.",
-    };
+    const parsed = parseSsUrl(trimmed);
+    if (!parsed) {
+      throw new Error("Failed to parse ss:// URL.");
+    }
+    return buildRuntime(parsed, "inline-ss-url");
   }
 
   // Dynamic fetch
@@ -171,13 +261,11 @@ export async function resolveAccessKey(
 
   // Dynamic payload returned an ss:// URL
   if (payload.startsWith("ss://")) {
-    return {
-      mode: "server_url",
-      serverUrlB64: encodeBase64Utf8(payload),
-      configB64: "",
-      source,
-      summary: "Dynamic key returned ss:// URL.",
-    };
+    const parsed = parseSsUrl(payload);
+    if (!parsed) {
+      throw new Error("Dynamic key returned an ss:// URL that could not be parsed.");
+    }
+    return buildRuntime(parsed, source);
   }
 
   // Try JSON parse
@@ -235,20 +323,5 @@ export async function resolveAccessKey(
     );
   }
 
-  const runtimeConfig = JSON.stringify({
-    local_address: "127.0.0.1",
-    local_port: socksPort,
-    server: configObj.server,
-    server_port: configObj.server_port,
-    password: configObj.password,
-    method: configObj.method,
-  });
-
-  return {
-    mode: "config",
-    serverUrlB64: "",
-    configB64: encodeBase64Utf8(runtimeConfig),
-    source,
-    summary: `server=${configObj.server}:${configObj.server_port}, method=${configObj.method}`,
-  };
+  return buildRuntime(configObj, source);
 }
