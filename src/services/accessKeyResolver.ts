@@ -5,6 +5,9 @@ export interface AccessKeyRuntime {
   serverInfoB64: string;
   source: string;
   summary: string;
+  // Lowercase hex string (no 0x prefix, no spaces). Empty when not supplied by
+  // the key. The proxy service may overlay a VS Code setting on top of this.
+  prefixHex: string;
 }
 
 interface ConfigObj {
@@ -12,6 +15,66 @@ interface ConfigObj {
   server_port: number;
   password: string;
   method: string;
+  prefix_hex?: string;
+}
+
+// Outline encodes salt-prefix bytes in ss:// URLs as percent-encoded raw bytes
+// in a `prefix` query parameter (e.g. ?prefix=%16%03%03%01%C2%9E%02). Some
+// providers instead pass hex. Accept either and normalize to lowercase hex.
+function decodePrefixValue(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return null;
+  }
+  // Pure hex (even length, hex chars only)
+  if (/^[0-9a-fA-F]+$/.test(trimmed) && trimmed.length % 2 === 0) {
+    return trimmed.toLowerCase();
+  }
+  // Percent-encoded bytes — decodeURIComponent isn't byte-safe for non-UTF-8
+  // sequences (which Outline prefixes typically are), so walk manually.
+  try {
+    const bytes: number[] = [];
+    let i = 0;
+    while (i < trimmed.length) {
+      const ch = trimmed[i];
+      if (ch === "%" && i + 2 < trimmed.length) {
+        const hh = trimmed.substring(i + 1, i + 3);
+        if (!/^[0-9a-fA-F]{2}$/.test(hh)) {
+          return null;
+        }
+        bytes.push(parseInt(hh, 16));
+        i += 3;
+      } else {
+        bytes.push(ch.charCodeAt(0) & 0xff);
+        i += 1;
+      }
+    }
+    return Buffer.from(bytes).toString("hex");
+  } catch {
+    return null;
+  }
+}
+
+function extractPrefixFromQuery(query: string): string {
+  if (!query) {
+    return "";
+  }
+  const params = query.replace(/^\?/, "").split("&");
+  for (const kv of params) {
+    const eq = kv.indexOf("=");
+    if (eq < 0) {
+      continue;
+    }
+    const key = kv.substring(0, eq).toLowerCase();
+    if (key === "prefix" || key === "prefix_hex" || key === "outlineprefix") {
+      const value = kv.substring(eq + 1);
+      const hex = decodePrefixValue(value);
+      if (hex) {
+        return hex;
+      }
+    }
+  }
+  return "";
 }
 
 function decodeBase64Loose(value: string): string | null {
@@ -35,17 +98,28 @@ export function parseSsUrl(url: string): ConfigObj | null {
   if (hashIdx >= 0) {
     rest = rest.substring(0, hashIdx);
   }
+  // Capture query (may contain Outline `prefix` parameter) before stripping it
+  // from the host portion.
+  let query = "";
   const qIdx = rest.indexOf("?");
   if (qIdx >= 0) {
+    query = rest.substring(qIdx);
     rest = rest.substring(0, qIdx);
   }
   const slashIdx = rest.indexOf("/");
   if (slashIdx >= 0) {
+    // /path can also carry the query in some encodings (ss://...host:port/?prefix=...)
+    const trailing = rest.substring(slashIdx);
+    const innerQ = trailing.indexOf("?");
+    if (innerQ >= 0 && !query) {
+      query = trailing.substring(innerQ);
+    }
     rest = rest.substring(0, slashIdx);
   }
   if (!rest) {
     return null;
   }
+  const prefixHex = extractPrefixFromQuery(query);
 
   const atIdx = rest.lastIndexOf("@");
   if (atIdx >= 0) {
@@ -68,7 +142,13 @@ export function parseSsUrl(url: string): ConfigObj | null {
     } catch {
       return null;
     }
-    return { server: ep.host, server_port: ep.port, method, password };
+    return {
+      server: ep.host,
+      server_port: ep.port,
+      method,
+      password,
+      prefix_hex: prefixHex || undefined,
+    };
   }
 
   // Legacy: base64(method:password@host:port)
@@ -94,7 +174,13 @@ export function parseSsUrl(url: string): ConfigObj | null {
   } catch {
     return null;
   }
-  return { server: ep.host, server_port: ep.port, method, password };
+  return {
+    server: ep.host,
+    server_port: ep.port,
+    method,
+    password,
+    prefix_hex: prefixHex || undefined,
+  };
 }
 
 export function encodeBase64Utf8(text: string): string {
@@ -216,10 +302,14 @@ function buildRuntime(configObj: ConfigObj, source: string): AccessKeyRuntime {
     password: configObj.password,
     method: configObj.method,
   });
+  const prefixHex = configObj.prefix_hex
+    ? configObj.prefix_hex.toLowerCase()
+    : "";
   return {
     serverInfoB64: encodeBase64Utf8(serverInfo),
     source,
-    summary: `server=${configObj.server}:${configObj.server_port}, method=${configObj.method}`,
+    summary: `server=${configObj.server}:${configObj.server_port}, method=${configObj.method}${prefixHex ? `, prefix=${prefixHex}` : ""}`,
+    prefixHex,
   };
 }
 
@@ -289,6 +379,10 @@ export async function resolveAccessKey(key: string): Promise<AccessKeyRuntime> {
         server_port: Number(obj.server_port),
         password: String(obj.password),
         method: String(obj.method),
+        prefix_hex:
+          typeof obj.prefix_hex === "string" && obj.prefix_hex
+            ? decodePrefixValue(obj.prefix_hex) || undefined
+            : undefined,
       };
     } else if (obj.transport?.tcp) {
       const tcp = obj.transport.tcp;
@@ -299,6 +393,10 @@ export async function resolveAccessKey(key: string): Promise<AccessKeyRuntime> {
           server_port: ep.port,
           password: String(tcp.secret),
           method: String(tcp.cipher),
+          prefix_hex:
+            typeof tcp.prefix_hex === "string" && tcp.prefix_hex
+              ? decodePrefixValue(tcp.prefix_hex) || undefined
+              : undefined,
         };
       }
     }

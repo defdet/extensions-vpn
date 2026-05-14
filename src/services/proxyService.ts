@@ -27,6 +27,8 @@ interface RemoteProxyConfig {
   socksPort: number;
   httpPort: number;
   shadowsocksVersion: string;
+  outlineHelperVersion: string;
+  outlinePrefixHex: string;
   testUrl: string;
   testExpectedHttpCodes: string;
   logTailLines: number;
@@ -352,6 +354,8 @@ export class ProxyService {
       socksPort: cfg.get<number>("socksPort", 1080),
       httpPort: cfg.get<number>("httpPort", 1081),
       shadowsocksVersion: `${cfg.get<string>("shadowsocksVersion", "v1.24.0")}`.trim(),
+      outlineHelperVersion: `${cfg.get<string>("outlineHelperVersion", "v0.7.0")}`.trim(),
+      outlinePrefixHex: `${cfg.get<string>("outlinePrefixHex", "16030301c29e02")}`.trim().toLowerCase().replace(/[^0-9a-f]/g, ""),
       testUrl: `${cfg.get<string>("testUrl", "https://api.openai.com/v1/models")}`.trim(),
       testExpectedHttpCodes: `${cfg.get<string>("testExpectedHttpCodes", "200,204,301,302,307,308,401,403")}`.trim(),
       logTailLines: cfg.get<number>("logTailLines", 80),
@@ -465,6 +469,7 @@ export class ProxyService {
       SOCKS_PORT: `${cfg.socksPort}`,
       HTTP_PORT: `${cfg.httpPort}`,
       SS_VERSION: cfg.shadowsocksVersion,
+      OUTLINE_HELPER_VERSION: cfg.outlineHelperVersion,
       TEST_URL: cfg.testUrl,
       TEST_EXPECTED_HTTP_CODES: cfg.testExpectedHttpCodes,
       TAIL_LINES: `${cfg.logTailLines}`,
@@ -472,6 +477,12 @@ export class ProxyService {
     };
     if (runtime) {
       envVars.SERVER_INFO_B64 = runtime.serverInfoB64;
+    }
+    // Effective prefix: explicit VS Code setting wins over what the key carries
+    // (so the user can fix a key in flight without re-pasting it).
+    const effectivePrefix = cfg.outlinePrefixHex || runtime?.prefixHex || "";
+    if (effectivePrefix) {
+      envVars.OUTLINE_PREFIX_HEX = effectivePrefix;
     }
     const secrets = accessKey ? [accessKey] : [];
     return this.executeScript(host, SETUP_REMOTE_SCRIPT, envVars, secrets, isLocal);

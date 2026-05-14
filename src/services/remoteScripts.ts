@@ -16,6 +16,9 @@ ACTION="\${ACTION:-status}"
 SOCKS_PORT="\${SOCKS_PORT:-1080}"
 HTTP_PORT="\${HTTP_PORT:-1081}"
 SS_VERSION="\${SS_VERSION:-v1.24.0}"
+OUTLINE_HELPER_VERSION="\${OUTLINE_HELPER_VERSION:-v0.7.0}"
+OUTLINE_HELPER_REPO="\${OUTLINE_HELPER_REPO:-defdet/extensions-vpn}"
+OUTLINE_PREFIX_HEX="\${OUTLINE_PREFIX_HEX:-}"
 SERVER_INFO_B64="\${SERVER_INFO_B64:-}"
 TEST_URL="\${TEST_URL:-https://api.openai.com/v1/models}"
 TEST_EXPECTED_HTTP_CODES="\${TEST_EXPECTED_HTTP_CODES:-200,204,301,302,307,308,401,403}"
@@ -34,6 +37,7 @@ LOG_FILE="$LOG_DIR/sslocal.log"
 SOCKS_PORT_FILE="$STATE_DIR/socks_port"
 HTTP_PORT_FILE="$STATE_DIR/http_port"
 PROXY_URL_FILE="$STATE_DIR/proxy_url"
+ACTIVE_BACKEND_FILE="$STATE_DIR/active_backend"
 ENV_SETUP_FILE="$HOME/.vscode-server/server-env-setup"
 
 # Detect host OS for cross-platform support
@@ -46,8 +50,19 @@ esac
 # Set binary name based on OS
 if [ "$HOST_OS" = "windows" ]; then
   SSLOCAL_BIN="$BIN_DIR/sslocal.exe"
+  OUTLINE_HELPER_BIN="$BIN_DIR/outline-helper.exe"
 else
   SSLOCAL_BIN="$BIN_DIR/sslocal"
+  OUTLINE_HELPER_BIN="$BIN_DIR/outline-helper"
+fi
+
+# Backend selection: when OUTLINE_PREFIX_HEX is non-empty we route through the
+# Outline-compatible helper (salt-prefix injection bypasses DPI on networks
+# that filter bare ShadowSocks). Otherwise we use vanilla sslocal.
+if [ -n "$OUTLINE_PREFIX_HEX" ]; then
+  ACTIVE_BACKEND="outline-helper"
+else
+  ACTIVE_BACKEND="sslocal"
 fi
 
 # Auto-detect VS Code settings path: remote (.vscode-server) vs local
@@ -129,6 +144,84 @@ detect_target() {
   esac
 }
 
+detect_helper_target() {
+  # Go-style os-arch tuple used by outline-helper release artifacts.
+  local arch
+  arch="$(uname -m)"
+  local os_tag
+  case "$HOST_OS" in
+    windows) os_tag="windows" ;;
+    macos)   os_tag="darwin" ;;
+    *)       os_tag="linux" ;;
+  esac
+  case "$arch" in
+    x86_64|amd64)  echo "\${os_tag}-amd64" ;;
+    aarch64|arm64) echo "\${os_tag}-arm64" ;;
+    *)             echo "unsupported:\${arch}" ;;
+  esac
+}
+
+install_outline_helper() {
+  if [ -x "$OUTLINE_HELPER_BIN" ]; then
+    local current_version=""
+    current_version="$("$OUTLINE_HELPER_BIN" --version 2>/dev/null | tr -d '[:space:]')" || true
+    if [ -n "$current_version" ] && [ "$current_version" = "$OUTLINE_HELPER_VERSION" ]; then
+      log INFO "outline-helper already installed at $OUTLINE_HELPER_VERSION"
+      return 0
+    fi
+    if [ -n "$current_version" ]; then
+      log INFO "outline-helper present ($current_version), upgrading to $OUTLINE_HELPER_VERSION"
+    fi
+  fi
+
+  local target
+  target="$(detect_helper_target)"
+  if [[ "$target" == unsupported:* ]]; then
+    log ERROR "Unsupported architecture for outline-helper auto-install: \${target#unsupported:}"
+    return 2
+  fi
+
+  local archive url tmp bin_name
+  if [ "$HOST_OS" = "windows" ]; then
+    archive="outline-helper-\${target}.zip"
+    bin_name="outline-helper.exe"
+  else
+    archive="outline-helper-\${target}.tar.gz"
+    bin_name="outline-helper"
+  fi
+  url="https://github.com/\${OUTLINE_HELPER_REPO}/releases/download/\${OUTLINE_HELPER_VERSION}/\${archive}"
+  tmp="$(mktemp -d "$TMP_DIR/install.XXXXXX")"
+
+  log INFO "Downloading $url"
+  if ! curl -fL --retry 3 --connect-timeout 15 "$url" -o "$tmp/$archive"; then
+    log ERROR "Failed to download outline-helper from $url"
+    log ERROR "Check that release $OUTLINE_HELPER_VERSION exists in repo $OUTLINE_HELPER_REPO and includes asset $archive."
+    rm -rf "$tmp"
+    return 3
+  fi
+  if [ "$HOST_OS" = "windows" ]; then
+    unzip -o "$tmp/$archive" -d "$tmp" >/dev/null 2>&1 || {
+      local py_bin
+      py_bin="$(find_python)"
+      "$py_bin" -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" "$tmp/$archive" "$tmp"
+    }
+  else
+    tar -xzf "$tmp/$archive" -C "$tmp"
+  fi
+  if [ ! -f "$tmp/$bin_name" ]; then
+    log ERROR "$bin_name not found in extracted archive."
+    return 4
+  fi
+  if [ "$HOST_OS" = "windows" ]; then
+    cp "$tmp/$bin_name" "$OUTLINE_HELPER_BIN"
+  else
+    install -m 0755 "$tmp/$bin_name" "$OUTLINE_HELPER_BIN"
+  fi
+  rm -rf "$tmp"
+  log OK "Installed outline-helper to $OUTLINE_HELPER_BIN"
+  "$OUTLINE_HELPER_BIN" --version | head -n1 | sed 's/^/[outline-helper-version] /'
+}
+
 install_sslocal() {
   if [ -x "$SSLOCAL_BIN" ]; then
     log INFO "sslocal already installed: $SSLOCAL_BIN"
@@ -202,6 +295,14 @@ try:
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 except OSError:
     raise SystemExit(2)
+# SO_REUSEADDR matches how sslocal (and most servers) bind: a port held only
+# by TIME_WAIT remnants of dead connections is still bindable. Without this,
+# a reload that tore down active proxy connections makes the next bind probe
+# spuriously report the port "in use" until TIME_WAIT clears (~60s).
+try:
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+except OSError:
+    pass
 try:
     sock.bind(("127.0.0.1", port))
 except OSError as exc:
@@ -409,8 +510,90 @@ PY
   log INFO "Prepared launch config with socks=127.0.0.1:$SOCKS_PORT"
 }
 
+_launch_sslocal() {
+  : > "$LOG_FILE"
+  # On Windows, convert MSYS paths to native Windows paths for sslocal.exe
+  local cfg_path="$CFG_FILE"
+  local log_path="$LOG_FILE"
+  if [ "$HOST_OS" = "windows" ] && command -v cygpath >/dev/null 2>&1; then
+    cfg_path="$(cygpath -w "$CFG_FILE")"
+    log_path="$(cygpath -w "$LOG_FILE")"
+  fi
+  nohup "$SSLOCAL_BIN" -c "$cfg_path" >>"$log_path" 2>&1 &
+  local pid="$!"
+  if [ "$HOST_OS" = "windows" ]; then
+    disown "$pid" 2>/dev/null || true
+  fi
+  echo "$pid" > "$PID_FILE"
+  sleep 2
+  if kill -0 "$pid" 2>/dev/null; then
+    log OK "sslocal started (pid=$pid), socks=127.0.0.1:\${SOCKS_PORT}, http=127.0.0.1:\${HTTP_PORT}"
+  else
+    log ERROR "sslocal failed to start. Last log lines:"
+    tail -n 50 "$LOG_FILE" || true
+    return 20
+  fi
+}
+
+_launch_outline_helper() {
+  if [ -z "$SERVER_INFO_B64" ]; then
+    log ERROR "SERVER_INFO_B64 is empty — cannot launch outline-helper."
+    return 10
+  fi
+  local py_bin
+  py_bin="$(find_python)"
+  # Decode SERVER_INFO_B64 to extract individual flag values. Python writes
+  # newline-separated lines; we read them into shell vars.
+  local helper_args
+  helper_args="$(SERVER_INFO_B64="$SERVER_INFO_B64" "$py_bin" - <<'PY'
+import base64, json, os, sys
+info = json.loads(base64.b64decode(os.environ["SERVER_INFO_B64"]).decode("utf-8"))
+print(info["server"])
+print(int(info["server_port"]))
+print(info["method"])
+print(info["password"])
+PY
+)" || {
+    log ERROR "Failed to decode SERVER_INFO_B64 for outline-helper."
+    return 11
+  }
+  local helper_server helper_port helper_cipher helper_password
+  helper_server="$(printf '%s\n' "$helper_args" | sed -n '1p')"
+  helper_port="$(printf '%s\n' "$helper_args" | sed -n '2p')"
+  helper_cipher="$(printf '%s\n' "$helper_args" | sed -n '3p')"
+  helper_password="$(printf '%s\n' "$helper_args" | sed -n '4p')"
+
+  : > "$LOG_FILE"
+  nohup "$OUTLINE_HELPER_BIN" \\
+    --server "$helper_server" \\
+    --server-port "$helper_port" \\
+    --cipher "$helper_cipher" \\
+    --password "$helper_password" \\
+    --prefix-hex "$OUTLINE_PREFIX_HEX" \\
+    --socks-listen "127.0.0.1:\${SOCKS_PORT}" \\
+    --http-listen "127.0.0.1:\${HTTP_PORT}" \\
+    >>"$LOG_FILE" 2>&1 &
+  local pid="$!"
+  if [ "$HOST_OS" = "windows" ]; then
+    disown "$pid" 2>/dev/null || true
+  fi
+  echo "$pid" > "$PID_FILE"
+  sleep 2
+  if kill -0 "$pid" 2>/dev/null; then
+    log OK "outline-helper started (pid=$pid), socks=127.0.0.1:\${SOCKS_PORT}, http=127.0.0.1:\${HTTP_PORT}, prefix=$OUTLINE_PREFIX_HEX"
+  else
+    log ERROR "outline-helper failed to start. Last log lines:"
+    tail -n 50 "$LOG_FILE" || true
+    return 20
+  fi
+}
+
 start_sslocal() {
-  install_sslocal
+  if [ "$ACTIVE_BACKEND" = "outline-helper" ]; then
+    install_outline_helper
+  else
+    install_sslocal
+  fi
   stop_sslocal >/dev/null 2>&1 || true
 
   # Auto-detect available SOCKS port
@@ -431,34 +614,13 @@ start_sslocal() {
   fi
   echo "$HTTP_PORT" > "$HTTP_PORT_FILE"
   printf '[actual-ports] socks=%s http=%s\n' "$SOCKS_PORT" "$HTTP_PORT"
+  echo "$ACTIVE_BACKEND" > "$ACTIVE_BACKEND_FILE"
 
-  write_config_file
-
-  : > "$LOG_FILE"
-
-  # On Windows, convert MSYS paths to native Windows paths for sslocal.exe
-  local cfg_path="$CFG_FILE"
-  local log_path="$LOG_FILE"
-  if [ "$HOST_OS" = "windows" ] && command -v cygpath >/dev/null 2>&1; then
-    cfg_path="$(cygpath -w "$CFG_FILE")"
-    log_path="$(cygpath -w "$LOG_FILE")"
-  fi
-
-  nohup "$SSLOCAL_BIN" -c "$cfg_path" >>"$log_path" 2>&1 &
-
-  local pid
-  pid="$!"
-  if [ "$HOST_OS" = "windows" ]; then
-    disown "$pid" 2>/dev/null || true
-  fi
-  echo "$pid" > "$PID_FILE"
-  sleep 2
-  if kill -0 "$pid" 2>/dev/null; then
-    log OK "sslocal started (pid=$pid), socks=127.0.0.1:\${SOCKS_PORT}, http=127.0.0.1:\${HTTP_PORT}"
+  if [ "$ACTIVE_BACKEND" = "outline-helper" ]; then
+    _launch_outline_helper || return $?
   else
-    log ERROR "sslocal failed to start. Last log lines:"
-    tail -n 50 "$LOG_FILE" || true
-    return 20
+    write_config_file
+    _launch_sslocal || return $?
   fi
 }
 
@@ -829,18 +991,22 @@ PY
 }
 
 status_sslocal() {
+  local recorded_backend="unknown"
+  if [ -f "$ACTIVE_BACKEND_FILE" ]; then
+    recorded_backend="$(cat "$ACTIVE_BACKEND_FILE" 2>/dev/null || echo unknown)"
+  fi
   if is_running; then
     local pid=""
     if [ -f "$PID_FILE" ]; then
       pid="$(cat "$PID_FILE" 2>/dev/null || true)"
     fi
     if [ -n "$pid" ]; then
-      log OK "sslocal is running (pid=$pid), socks=127.0.0.1:\${SOCKS_PORT}, http=127.0.0.1:\${HTTP_PORT}"
+      log OK "$recorded_backend is running (pid=$pid), socks=127.0.0.1:\${SOCKS_PORT}, http=127.0.0.1:\${HTTP_PORT}"
     else
-      log OK "sslocal appears to be running (pid unavailable), socks=127.0.0.1:\${SOCKS_PORT}, http=127.0.0.1:\${HTTP_PORT}"
+      log OK "$recorded_backend appears to be running (pid unavailable), socks=127.0.0.1:\${SOCKS_PORT}, http=127.0.0.1:\${HTTP_PORT}"
     fi
   else
-    log INFO "sslocal is not running."
+    log INFO "proxy ($recorded_backend) is not running."
   fi
 
   show_proxy_state
@@ -920,11 +1086,11 @@ test_proxy() {
     return 40
   fi
   if ! _test_proxy_one "http" "http"; then
+    log WARN "HTTP proxy listener test failed; continuing because SOCKS path is used by clients."
     log INFO "Recent sslocal log tail for diagnostics:"
     tail -n 30 "$LOG_FILE" 2>/dev/null || true
-    return 41
   fi
-  log OK "Proxy tests completed (socks + http)."
+  log OK "Proxy tests completed (socks required; http best-effort)."
 }
 
 show_logs() {
@@ -938,7 +1104,11 @@ show_logs() {
 
 case "$ACTION" in
   install)
-    install_sslocal
+    if [ "$ACTIVE_BACKEND" = "outline-helper" ]; then
+      install_outline_helper
+    else
+      install_sslocal
+    fi
     ;;
   up)
     start_sslocal
@@ -995,9 +1165,11 @@ CFG_FILE="$STATE_DIR/config.json"
 LAUNCH_CFG_FILE="$STATE_DIR/launch_config.json"
 LOG_FILE="$LOG_DIR/sslocal.log"
 SSLOCAL_BIN="$BIN_DIR/sslocal"
+OUTLINE_HELPER_BIN="$BIN_DIR/outline-helper"
 SOCKS_PORT_FILE="$STATE_DIR/socks_port"
 HTTP_PORT_FILE="$STATE_DIR/http_port"
 PROXY_URL_FILE="$STATE_DIR/proxy_url"
+ACTIVE_BACKEND_FILE="$STATE_DIR/active_backend"
 ENV_SETUP_FILE="$HOME/.vscode-server/server-env-setup"
 
 # Detect host OS for cross-platform support
@@ -1009,6 +1181,7 @@ esac
 
 if [ "$HOST_OS" = "windows" ]; then
   SSLOCAL_BIN="$BIN_DIR/sslocal.exe"
+  OUTLINE_HELPER_BIN="$BIN_DIR/outline-helper.exe"
 fi
 
 IS_VSCODE_SERVER=0
@@ -1082,22 +1255,28 @@ kill_stray_processes() {
   if ! command -v pgrep >/dev/null 2>&1; then
     return 0
   fi
-  local pids
-  pids="$(pgrep -f "$SSLOCAL_BIN" || true)"
-  if [ -z "$pids" ]; then
-    return 0
-  fi
-  for pid in $pids; do
-    kill "$pid" >/dev/null 2>&1 || true
-  done
-  sleep 1
-  pids="$(pgrep -f "$SSLOCAL_BIN" || true)"
-  if [ -n "$pids" ]; then
+  local killed_any=0
+  for target in "$SSLOCAL_BIN" "$OUTLINE_HELPER_BIN"; do
+    local pids
+    pids="$(pgrep -f "$target" || true)"
+    if [ -z "$pids" ]; then
+      continue
+    fi
     for pid in $pids; do
-      kill -9 "$pid" >/dev/null 2>&1 || true
+      kill "$pid" >/dev/null 2>&1 || true
     done
+    sleep 1
+    pids="$(pgrep -f "$target" || true)"
+    if [ -n "$pids" ]; then
+      for pid in $pids; do
+        kill -9 "$pid" >/dev/null 2>&1 || true
+      done
+    fi
+    killed_any=1
+  done
+  if [ "$killed_any" = "1" ]; then
+    log OK "Killed stray proxy process(es)."
   fi
-  log OK "Killed stray sslocal process(es)."
 }
 
 terminal_env_key() {
@@ -1290,7 +1469,7 @@ set_vscode_proxy_disable "$TERM_KEY"
 clear_server_env_setup
 unwrap_claude_code
 
-rm -f "$SSLOCAL_BIN" "$CFG_FILE" "$LAUNCH_CFG_FILE" "$SOCKS_PORT_FILE" "$HTTP_PORT_FILE" "$PROXY_URL_FILE" >/dev/null 2>&1 || true
+rm -f "$SSLOCAL_BIN" "$OUTLINE_HELPER_BIN" "$CFG_FILE" "$LAUNCH_CFG_FILE" "$SOCKS_PORT_FILE" "$HTTP_PORT_FILE" "$PROXY_URL_FILE" "$ACTIVE_BACKEND_FILE" >/dev/null 2>&1 || true
 
 if [ "$REMOVE_ALL_STATE" = "1" ]; then
   rm -rf "$BASE_DIR" >/dev/null 2>&1 || true

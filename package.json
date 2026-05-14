@@ -2,7 +2,7 @@
   "name": "remote-ss-proxy-controller",
   "displayName": "Remote SS Proxy Controller",
   "description": "Manage remote Shadowsocks proxy lifecycle for Remote-SSH from VS Code UI.",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "publisher": "Max",
   "license": "MIT",
   "repository": {
@@ -53,7 +53,7 @@
       },
       {
         "command": "remoteProxy.reinstallSslocal",
-        "title": "Proxy: Reinstall sslocal"
+        "title": "Proxy: Reinstall Proxy Binary"
       },
       {
         "command": "remoteProxy.showQuickActions",
@@ -103,6 +103,16 @@
           "type": "string",
           "default": "v1.24.0",
           "description": "Shadowsocks Rust version used by install/reinstall actions."
+        },
+        "remoteProxy.outlineHelperVersion": {
+          "type": "string",
+          "default": "v0.7.0",
+          "description": "Release tag in this repo to pull the outline-helper binary from. Only used when an Outline-style salt prefix is configured (via access key or 'remoteProxy.outlinePrefixHex')."
+        },
+        "remoteProxy.outlinePrefixHex": {
+          "type": "string",
+          "default": "16030301c29e02",
+          "description": "Hex-encoded salt-prefix bytes for Outline-compatible DPI evasion (default value mimics a TLS record header — matches VanyaVPN's tun2socks config). When set, the extension routes through outline-helper instead of sslocal. Clear to use plain ShadowSocks. Overrides any prefix carried by the access key."
         },
         "remoteProxy.testUrl": {
           "type": "string",
