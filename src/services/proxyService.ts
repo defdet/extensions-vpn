@@ -16,11 +16,15 @@ import {
   redactLine
 } from "./proxyCore";
 import { SETUP_REMOTE_SCRIPT, REVERT_REMOTE_SCRIPT } from "./remoteScripts";
-import { runRemoteScript } from "./sshRunner";
+import { runRemoteScript, type SshAuth } from "./sshRunner";
+import { looksLikeSshAuthFailure } from "./sshAskpass";
 
 const OUTPUT_NAME = "Remote Proxy";
 const STATUS_PREFIX = "remoteProxy.status.";
 const LAST_HOST_KEY = "remoteProxy.lastSshHost";
+const SSH_PASSWORD_PREFIX = "remoteProxy.sshPassword.";
+
+type SshAuthMode = "auto" | "agent-only" | "password";
 
 interface RemoteProxyConfig {
   sshHost: string;
@@ -37,6 +41,7 @@ interface RemoteProxyConfig {
   dockerContainer: string;
   customCommandTemplate: string;
   wrapClaudeCode: boolean;
+  sshAuthMode: SshAuthMode;
 }
 
 interface ScriptRunResult {
@@ -364,7 +369,101 @@ export class ProxyService {
       dockerContainer: `${cfg.get<string>("dockerContainer", "")}`.trim(),
       customCommandTemplate: `${cfg.get<string>("customCommandTemplate", "")}`.trim(),
       wrapClaudeCode: cfg.get<boolean>("wrapClaudeCode", true),
+      sshAuthMode: this.coerceAuthMode(cfg.get<string>("sshAuthMode", "auto")),
     };
+  }
+
+  private coerceAuthMode(value: string): SshAuthMode {
+    if (value === "agent-only" || value === "password") {
+      return value;
+    }
+    return "auto";
+  }
+
+  // ---------------------------------------------------------------------------
+  // SSH password storage (per-authority, VS Code SecretStorage)
+  // ---------------------------------------------------------------------------
+
+  private sshPasswordKey(authority: string): string {
+    return `${SSH_PASSWORD_PREFIX}${authority}`;
+  }
+
+  private async getStoredSshPassword(authority: string): Promise<string | undefined> {
+    return this.context.secrets.get(this.sshPasswordKey(authority));
+  }
+
+  private async storeSshPassword(authority: string, password: string): Promise<void> {
+    await this.context.secrets.store(this.sshPasswordKey(authority), password);
+  }
+
+  private async deleteSshPassword(authority: string): Promise<void> {
+    await this.context.secrets.delete(this.sshPasswordKey(authority));
+  }
+
+  /**
+   * Prompt the user for a password and store it. Returns the password on
+   * success, or undefined if the user cancelled.
+   */
+  private async promptForSshPassword(
+    authority: string,
+    reason: "auth-failed" | "explicit"
+  ): Promise<string | undefined> {
+    if (reason === "auth-failed") {
+      const choice = await vscode.window.showWarningMessage(
+        `SSH key authentication failed for '${authority}'. Use password authentication?`,
+        { modal: false },
+        "Enter Password",
+        "Cancel"
+      );
+      if (choice !== "Enter Password") {
+        return undefined;
+      }
+    }
+    const input = await vscode.window.showInputBox({
+      title: `SSH password for ${authority}`,
+      prompt: "Stored encrypted in VS Code SecretStorage. Used only for this extension's SSH calls.",
+      password: true,
+      ignoreFocusOut: true,
+    });
+    if (!input) {
+      return undefined;
+    }
+    await this.storeSshPassword(authority, input);
+    return input;
+  }
+
+  public async configureSshPassword(): Promise<void> {
+    const authority = this.getAuthority();
+    if (authority === "local") {
+      await vscode.window.showInformationMessage(
+        "SSH password is only used when the active workspace is a Remote-SSH connection."
+      );
+      return;
+    }
+    const password = await this.promptForSshPassword(authority, "explicit");
+    if (password) {
+      await vscode.window.showInformationMessage(
+        `Stored SSH password for ${authority}.`
+      );
+    }
+  }
+
+  public async clearSshPassword(): Promise<void> {
+    const authority = this.getAuthority();
+    if (authority === "local") {
+      return;
+    }
+    const existing = await this.getStoredSshPassword(authority);
+    if (!existing) {
+      await vscode.window.showInformationMessage(
+        `No stored SSH password for ${authority}.`
+      );
+      return;
+    }
+    await this.deleteSshPassword(authority);
+    await vscode.window.showInformationMessage(
+      `Cleared stored SSH password for ${authority}.`
+    );
   }
 
   private getAuthority(): string {
@@ -518,6 +617,7 @@ export class ProxyService {
 
     const allLines: string[] = [];
     const runtimeSecrets = [...extraSecrets];
+    const authority = this.getAuthority();
 
     // Log the command with sensitive values redacted
     const safeEnv = Object.entries(envVars)
@@ -542,9 +642,99 @@ export class ProxyService {
       this.output.appendLine(`${prefix} ${event.message}`);
     };
 
-    const result = isLocal
-      ? await runLocalScript(script, envVars, onLine, profileConfig)
-      : await runRemoteScript(host, script, envVars, onLine, profileConfig);
+    // Build the initial auth handle. For mode=password, prefetch from storage
+    // (prompt once if missing) so we skip the doomed key-auth attempt.
+    let auth: SshAuth | undefined;
+    if (!isLocal && cfg.sshAuthMode === "password") {
+      let pw = await this.getStoredSshPassword(authority);
+      if (!pw) {
+        pw = await this.promptForSshPassword(authority, "explicit");
+      }
+      if (pw) {
+        auth = { kind: "askpass", password: pw };
+        runtimeSecrets.push(pw);
+      }
+    }
+
+    const runOnce = async (
+      currentAuth: SshAuth | undefined
+    ): Promise<{ exitCode: number; lines: string[] }> => {
+      if (isLocal) {
+        return runLocalScript(script, envVars, onLine, profileConfig);
+      }
+      return runRemoteScript(
+        host,
+        script,
+        envVars,
+        onLine,
+        profileConfig,
+        currentAuth
+      );
+    };
+
+    let result = await runOnce(auth);
+
+    // Auto-mode upgrade: first attempt was without auth, SSH failed with an
+    // auth-shaped error → prompt for / use stored password and retry once.
+    if (
+      !isLocal &&
+      result.exitCode !== 0 &&
+      cfg.sshAuthMode === "auto" &&
+      !auth &&
+      looksLikeSshAuthFailure(result.exitCode, result.lines)
+    ) {
+      let pw = await this.getStoredSshPassword(authority);
+      if (!pw) {
+        pw = await this.promptForSshPassword(authority, "auth-failed");
+      }
+      if (pw) {
+        auth = { kind: "askpass", password: pw };
+        runtimeSecrets.push(pw);
+        this.output.appendLine(`[INFO] retrying with stored SSH password for ${authority}`);
+        result = await runOnce(auth);
+      }
+    }
+
+    // If we ended up authenticating with a password and *still* hit an
+    // auth-shaped failure, the stored password is wrong. Clear it so the next
+    // run prompts again, and surface a one-click reconfigure on the toast.
+    if (
+      !isLocal &&
+      auth &&
+      result.exitCode !== 0 &&
+      looksLikeSshAuthFailure(result.exitCode, result.lines)
+    ) {
+      await this.deleteSshPassword(authority);
+      void vscode.window
+        .showErrorMessage(
+          `SSH password rejected for ${authority}. Stored password cleared.`,
+          "Configure SSH Password"
+        )
+        .then((choice) => {
+          if (choice === "Configure SSH Password") {
+            void this.configureSshPassword();
+          }
+        });
+    } else if (
+      !isLocal &&
+      !auth &&
+      result.exitCode !== 0 &&
+      cfg.sshAuthMode === "agent-only" &&
+      looksLikeSshAuthFailure(result.exitCode, result.lines)
+    ) {
+      // agent-only mode: surface the password command as a discoverable next
+      // step rather than burying it in the palette.
+      void vscode.window
+        .showErrorMessage(
+          `SSH auth failed for ${authority}. 'sshAuthMode' is 'agent-only' — enable password fallback?`,
+          "Configure SSH Password"
+        )
+        .then((choice) => {
+          if (choice === "Configure SSH Password") {
+            void this.configureSshPassword();
+          }
+        });
+    }
 
     await this.deriveStatusFromOutput(allLines);
 
@@ -556,7 +746,7 @@ export class ProxyService {
 
     return {
       exitCode: result.exitCode,
-      lines: allLines
+      lines: allLines,
     };
   }
 

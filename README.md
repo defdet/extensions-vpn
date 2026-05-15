@@ -44,6 +44,8 @@ After **Proxy: Disable**, do the same Reload Window (and Kill VS Code Server if 
 | Command | Description |
 |---|---|
 | `Proxy: Configure Access Key` | Store access key in VS Code SecretStorage |
+| `Proxy: Configure SSH Password` | Store an SSH password for the active Remote-SSH host in VS Code SecretStorage. See [Authentication](#authentication) |
+| `Proxy: Clear SSH Password` | Remove the stored SSH password for the active host |
 | `Proxy: Enable` | Install proxy binary (if needed), start proxy, set remote proxy settings |
 | `Proxy: Disable` | Stop proxy, clear proxy settings, remove proxy binary |
 | `Proxy: Status` | Show current proxy process and settings state (reports active backend) |
@@ -57,6 +59,7 @@ After **Proxy: Disable**, do the same Reload Window (and Kill VS Code Server if 
 | Setting | Default | Description |
 |---|---|---|
 | `remoteProxy.sshHost` | *(auto-detected)* | SSH host override |
+| `remoteProxy.sshAuthMode` | `auto` | How the extension authenticates its SSH calls: `auto` (try key/agent, fall back to stored password on permission-denied), `agent-only` (never use password), `password` (always use stored password). See [Authentication](#authentication) |
 | `remoteProxy.socksPort` | `1080` | SOCKS5 bind port on remote |
 | `remoteProxy.httpPort` | `1081` | HTTP CONNECT bind port on remote. Used for `HTTPS_PROXY`/`HTTP_PROXY` env so tools that only speak HTTP CONNECT (e.g. Node `undici`/`fetch`, Claude Code) can use the tunnel |
 | `remoteProxy.shadowsocksVersion` | `v1.24.0` | sslocal release version |
@@ -100,6 +103,27 @@ The extension ships `outline-helper`, a small Go binary built on [outline-sdk](h
 - Default prefix matches what the VanyaVPN client (built on [Outline](https://github.com/Jigsaw-Code/outline-apps)) injects — captured from its `tun2socks -proxyPrefix` argument. If your SS provider uses a different obfuscator, set `remoteProxy.outlinePrefixHex` to its hex-encoded prefix value, or clear it (`""`) to fall back to plain `sslocal`.
 - The setting also accepts a prefix embedded in the access key URL itself: `ss://...?prefix=%16%03%03%01%C2%9E%02` (percent-encoded raw bytes — Outline's URL convention) or `ss://...?prefix=16030301c29e02` (hex). When both are present, the VS Code setting wins.
 - `Proxy: Status` reports the active backend; `Proxy: Show Logs` tails whichever binary is running.
+
+## Authentication
+
+The extension shells out to the system `ssh` binary for every remote action (so it inherits your `~/.ssh/config`, ProxyJump, ControlMaster, etc.). By default this only works for non-interactive auth — `ssh-agent` or unencrypted keys. If your remote requires a password or a key passphrase, set up password fallback:
+
+1. Run **Proxy: Configure SSH Password** and enter the password. It's stored in VS Code SecretStorage (encrypted at rest) under a key scoped to the current Remote-SSH authority.
+2. Run **Proxy: Enable** as usual.
+
+Under the hood, the runner sets `SSH_ASKPASS_REQUIRE=force` and points `SSH_ASKPASS` at a per-invocation helper in a private temp dir. The password is passed to the helper via the spawned SSH process's environment — never written into the helper file itself. The helper is deleted in `finally` regardless of how the SSH attempt exits.
+
+`remoteProxy.sshAuthMode` controls when the password is used:
+
+| Mode | Behavior |
+|---|---|
+| `auto` (default) | First attempt uses your existing key/agent. On `Permission denied`, the extension prompts for / loads the stored password and retries once. Users who have working keys never see a prompt |
+| `agent-only` | Never use password auth — only key/agent. SSH failures surface a "Configure SSH Password?" toast as a one-click way to switch modes |
+| `password` | Skip the doomed key attempt and authenticate with the stored password on every invocation. Saves a few seconds per call for password-only environments |
+
+If the stored password is rejected, it's cleared and a "Configure SSH Password" toast appears so the next attempt prompts cleanly.
+
+**Not supported in this iteration:** 2FA / OTP / Kerberos. Those require interactive multi-step prompts that `SSH_ASKPASS` alone can't drive.
 
 ## Requirements
 

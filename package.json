@@ -2,7 +2,7 @@
   "name": "remote-ss-proxy-controller",
   "displayName": "Remote SS Proxy Controller",
   "description": "Manage remote Shadowsocks proxy lifecycle for Remote-SSH from VS Code UI.",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "publisher": "Max",
   "license": "MIT",
   "repository": {
@@ -30,6 +30,14 @@
       {
         "command": "remoteProxy.configureAccessKey",
         "title": "Proxy: Configure Access Key"
+      },
+      {
+        "command": "remoteProxy.configureSshPassword",
+        "title": "Proxy: Configure SSH Password"
+      },
+      {
+        "command": "remoteProxy.clearSshPassword",
+        "title": "Proxy: Clear SSH Password"
       },
       {
         "command": "remoteProxy.enable",
@@ -67,6 +75,8 @@
     "menus": {
       "commandPalette": [
         { "command": "remoteProxy.configureAccessKey" },
+        { "command": "remoteProxy.configureSshPassword" },
+        { "command": "remoteProxy.clearSshPassword" },
         { "command": "remoteProxy.enable" },
         { "command": "remoteProxy.disable" },
         { "command": "remoteProxy.status" },
@@ -84,6 +94,17 @@
           "type": "string",
           "default": "",
           "description": "Optional SSH host override. If empty, host is derived from the active remote authority."
+        },
+        "remoteProxy.sshAuthMode": {
+          "type": "string",
+          "enum": ["auto", "agent-only", "password"],
+          "default": "auto",
+          "description": "How the extension authenticates its SSH calls. 'auto' tries key/agent first and retries with a stored password on permission-denied. 'agent-only' never uses password auth. 'password' always uses the stored password (skips the first failed attempt).",
+          "enumDescriptions": [
+            "Try agent/key first; on permission-denied, prompt for / use the stored password and retry once",
+            "Only use agent/key — never prompt for a password",
+            "Always authenticate with the stored password"
+          ]
         },
         "remoteProxy.socksPort": {
           "type": "number",

@@ -6,10 +6,16 @@ import {
   buildRemoteCommand,
   type ClusterProfileConfig,
 } from "./clusterProfile";
+import { makeAskpassHelper } from "./sshAskpass";
 
 export interface SshRunResult {
   exitCode: number;
   lines: string[];
+}
+
+export interface SshAuth {
+  kind: "askpass";
+  password: string;
 }
 
 /**
@@ -68,7 +74,8 @@ export function runRemoteScript(
   script: string,
   envVars: Record<string, string>,
   onLine: (line: string) => void,
-  profileConfig?: ClusterProfileConfig
+  profileConfig?: ClusterProfileConfig,
+  auth?: SshAuth
 ): Promise<SshRunResult> {
   const sshBin = findSshExecutable();
   const profile = profileConfig ?? DEFAULT_PROFILE;
@@ -83,9 +90,22 @@ export function runRemoteScript(
 
   const cleanScript = script.replace(/\r/g, "");
 
+  // If password auth is requested, set up an SSH_ASKPASS helper. The helper
+  // file is deleted in finally regardless of success/failure.
+  const askpass =
+    auth && auth.kind === "askpass" ? makeAskpassHelper(auth.password) : null;
+  const childEnv: NodeJS.ProcessEnv = askpass
+    ? { ...process.env, ...askpass.envOverlay }
+    : process.env;
+
   const proc = cp.spawn(sshBin, buildSshArgs(sshHost, remoteCommand), {
     shell: false,
     stdio: ["pipe", "pipe", "pipe"],
+    env: childEnv,
+    // Detach from any controlling TTY so SSH cannot open /dev/tty to prompt
+    // directly, forcing it down the SSH_ASKPASS path on older OpenSSH builds
+    // that don't honor SSH_ASKPASS_REQUIRE=force. Harmless when no TTY exists.
+    detached: askpass != null && process.platform !== "win32",
   });
 
   // Pipe script to stdin
@@ -105,9 +125,16 @@ export function runRemoteScript(
   errRl.on("line", handleLine);
 
   return new Promise<SshRunResult>((resolve, reject) => {
-    proc.once("error", reject);
-    proc.once("close", (code) => {
-      resolve({ exitCode: code ?? 1, lines: allLines });
-    });
+    const finish = (fn: () => void): void => {
+      try {
+        askpass?.cleanup();
+      } finally {
+        fn();
+      }
+    };
+    proc.once("error", (err) => finish(() => reject(err)));
+    proc.once("close", (code) =>
+      finish(() => resolve({ exitCode: code ?? 1, lines: allLines }))
+    );
   });
 }

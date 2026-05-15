@@ -9,6 +9,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand("remoteProxy.configureAccessKey", async () => {
       await service.configureAccessKey();
     }),
+    vscode.commands.registerCommand("remoteProxy.configureSshPassword", async () => {
+      await service.configureSshPassword();
+    }),
+    vscode.commands.registerCommand("remoteProxy.clearSshPassword", async () => {
+      await service.clearSshPassword();
+    }),
     vscode.commands.registerCommand("remoteProxy.enable", async () => {
       await service.enable();
     }),
