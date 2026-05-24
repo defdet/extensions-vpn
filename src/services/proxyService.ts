@@ -119,7 +119,14 @@ export class ProxyService {
     const cfg = this.getConfig();
     await this.executeWithStatus(authority, "enable", async () => {
       this.output.appendLine("[INFO] Resolving access key payload...");
-      const runtime = await resolveAccessKey(key);
+      let runtime: AccessKeyRuntime;
+      try {
+        runtime = await resolveAccessKey(key);
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : `${error ?? "unknown error"}`;
+        this.output.appendLine(`[ERROR] Access key resolution failed: ${reason}`);
+        throw error;
+      }
       this.output.appendLine(`[OK] Key resolved via ${runtime.source}. ${runtime.summary}`);
       await this.runSetupAction("up", host, cfg, runtime, key, isLocal);
       const claudeHint = cfg.wrapClaudeCode

@@ -2,7 +2,7 @@
   "name": "remote-ss-proxy-controller",
   "displayName": "Remote SS Proxy Controller",
   "description": "Manage remote Shadowsocks proxy lifecycle for Remote-SSH from VS Code UI.",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "publisher": "Max",
   "license": "MIT",
   "repository": {
@@ -74,17 +74,39 @@
     ],
     "menus": {
       "commandPalette": [
-        { "command": "remoteProxy.configureAccessKey" },
-        { "command": "remoteProxy.configureSshPassword" },
-        { "command": "remoteProxy.clearSshPassword" },
-        { "command": "remoteProxy.enable" },
-        { "command": "remoteProxy.disable" },
-        { "command": "remoteProxy.status" },
-        { "command": "remoteProxy.testConnectivity" },
-        { "command": "remoteProxy.showLogs" },
-        { "command": "remoteProxy.reinstallSslocal" },
-        { "command": "remoteProxy.showQuickActions" },
-        { "command": "remoteProxy.selectProfile" }
+        {
+          "command": "remoteProxy.configureAccessKey"
+        },
+        {
+          "command": "remoteProxy.configureSshPassword"
+        },
+        {
+          "command": "remoteProxy.clearSshPassword"
+        },
+        {
+          "command": "remoteProxy.enable"
+        },
+        {
+          "command": "remoteProxy.disable"
+        },
+        {
+          "command": "remoteProxy.status"
+        },
+        {
+          "command": "remoteProxy.testConnectivity"
+        },
+        {
+          "command": "remoteProxy.showLogs"
+        },
+        {
+          "command": "remoteProxy.reinstallSslocal"
+        },
+        {
+          "command": "remoteProxy.showQuickActions"
+        },
+        {
+          "command": "remoteProxy.selectProfile"
+        }
       ]
     },
     "configuration": {
@@ -97,7 +119,11 @@
         },
         "remoteProxy.sshAuthMode": {
           "type": "string",
-          "enum": ["auto", "agent-only", "password"],
+          "enum": [
+            "auto",
+            "agent-only",
+            "password"
+          ],
           "default": "auto",
           "description": "How the extension authenticates its SSH calls. 'auto' tries key/agent first and retries with a stored password on permission-denied. 'agent-only' never uses password auth. 'password' always uses the stored password (skips the first failed attempt).",
           "enumDescriptions": [
@@ -159,7 +185,11 @@
         },
         "remoteProxy.clusterProfile": {
           "type": "string",
-          "enum": ["direct", "docker", "custom"],
+          "enum": [
+            "direct",
+            "docker",
+            "custom"
+          ],
           "default": "direct",
           "description": "How commands are executed on the remote host. All profiles connect via SSH.",
           "enumDescriptions": [

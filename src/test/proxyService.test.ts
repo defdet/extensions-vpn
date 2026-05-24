@@ -9,8 +9,10 @@ import {
 } from "../services/proxyCore";
 import {
   encodeBase64Utf8,
+  parseSsUrl,
   parseEndpoint,
-  parseYamlLikePayload
+  parseYamlLikePayload,
+  resolveAccessKey
 } from "../services/accessKeyResolver";
 import { SETUP_REMOTE_SCRIPT } from "../services/remoteScripts";
 
@@ -123,6 +125,23 @@ suite("Access Key Resolver Unit", () => {
 
   test("parseEndpoint throws on missing port", () => {
     assert.throws(() => parseEndpoint("example.com"), /host:port/);
+  });
+
+  test("parseSsUrl accepts uppercase scheme", () => {
+    const parsed = parseSsUrl("SS://YWVzLTI1Ni1nY206cGFzczEyMw@example.com:8388");
+    assert.ok(parsed);
+    assert.equal(parsed.server, "example.com");
+    assert.equal(parsed.server_port, 8388);
+    assert.equal(parsed.method, "aes-256-gcm");
+    assert.equal(parsed.password, "pass123");
+  });
+
+  test("resolveAccessKey accepts quoted mixed-case key", async () => {
+    const runtime = await resolveAccessKey("  \"SS://YWVzLTI1Ni1nY206cGFzczEyMw@example.com:8388\"  ");
+    assert.equal(runtime.source, "inline-ss-url");
+    const decoded = Buffer.from(runtime.serverInfoB64, "base64").toString("utf-8");
+    assert.ok(decoded.includes("\"server\":\"example.com\""));
+    assert.ok(decoded.includes("\"server_port\":8388"));
   });
 
   test("parseYamlLikePayload extracts config from YAML-like text", () => {

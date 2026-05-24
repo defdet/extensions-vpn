@@ -18,6 +18,17 @@ interface ConfigObj {
   prefix_hex?: string;
 }
 
+function normalizeAccessKeyInput(input: string): string {
+  // Trim whitespace/BOM and common copy-paste wrappers.
+  const trimmed = input.trim().replace(/^\uFEFF/, "");
+  const unquoted = trimmed.replace(/^(['"])(.*)\1$/s, "$2").trim();
+  return unquoted;
+}
+
+function hasScheme(value: string, scheme: string): boolean {
+  return value.substring(0, scheme.length).toLowerCase() === scheme;
+}
+
 // Outline encodes salt-prefix bytes in ss:// URLs as percent-encoded raw bytes
 // in a `prefix` query parameter (e.g. ?prefix=%16%03%03%01%C2%9E%02). Some
 // providers instead pass hex. Accept either and normalize to lowercase hex.
@@ -90,7 +101,7 @@ function decodeBase64Loose(value: string): string | null {
 }
 
 export function parseSsUrl(url: string): ConfigObj | null {
-  if (!url.startsWith("ss://")) {
+  if (!hasScheme(url, "ss://")) {
     return null;
   }
   let rest = url.substring(5);
@@ -318,10 +329,11 @@ export async function resolveAccessKey(key: string): Promise<AccessKeyRuntime> {
     throw new Error("Access key is empty.");
   }
 
-  const trimmed = key.trim();
+  const trimmed = normalizeAccessKeyInput(key);
+  const lowered = trimmed.toLowerCase();
 
   // Direct ss:// URL
-  if (trimmed.startsWith("ss://")) {
+  if (lowered.startsWith("ss://")) {
     const parsed = parseSsUrl(trimmed);
     if (!parsed) {
       throw new Error("Failed to parse ss:// URL.");
@@ -333,13 +345,13 @@ export async function resolveAccessKey(key: string): Promise<AccessKeyRuntime> {
   let payload: string;
   let source: string;
 
-  if (trimmed.startsWith("ssconf://")) {
+  if (lowered.startsWith("ssconf://")) {
     source = "dynamic-ssconf";
     const url = "https://" + trimmed.substring("ssconf://".length);
     payload = (await fetchUrl(url)).trim();
   } else if (
-    trimmed.startsWith("https://") ||
-    trimmed.startsWith("http://")
+    lowered.startsWith("https://") ||
+    lowered.startsWith("http://")
   ) {
     source = "dynamic-http";
     payload = (await fetchUrl(trimmed)).trim();
