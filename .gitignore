@@ -4,3 +4,4 @@ out/
 .vscode-test/
 backups/
 *.bak
+private/

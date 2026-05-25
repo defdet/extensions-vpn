@@ -204,7 +204,14 @@ export function fetchUrl(url: string, depth = 0): Promise<string> {
   }
   return new Promise((resolve, reject) => {
     const client = url.startsWith("https://") ? https : http;
-    const req = client.get(url, { timeout: 20_000 }, (res) => {
+    const req = client.get(url, {
+      timeout: 20_000,
+      headers: {
+        // Some providers fail (HTTP 500) when User-Agent is absent.
+        "User-Agent": "remote-ss-proxy-controller/0.7",
+        Accept: "application/json,text/plain,*/*",
+      },
+    }, (res) => {
       const status = res.statusCode ?? 0;
       if (
         (status >= 301 && status <= 303) ||
@@ -394,7 +401,9 @@ export async function resolveAccessKey(key: string): Promise<AccessKeyRuntime> {
         prefix_hex:
           typeof obj.prefix_hex === "string" && obj.prefix_hex
             ? decodePrefixValue(obj.prefix_hex) || undefined
-            : undefined,
+            : typeof obj.prefix === "string" && obj.prefix
+              ? decodePrefixValue(obj.prefix) || undefined
+              : undefined,
       };
     } else if (obj.transport?.tcp) {
       const tcp = obj.transport.tcp;
