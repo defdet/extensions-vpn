@@ -204,7 +204,16 @@ export function fetchUrl(url: string, depth = 0): Promise<string> {
   }
   return new Promise((resolve, reject) => {
     const client = url.startsWith("https://") ? https : http;
-    const req = client.get(url, { timeout: 20_000 }, (res) => {
+    // Some dynamic-key providers gate responses on a real User-Agent and return
+    // 5xx/403 to bare Node requests (which send no UA header by default).
+    const requestOptions = {
+      timeout: 20_000,
+      headers: {
+        "User-Agent": "remote-ss-proxy-controller/0.7.2 (vscode-extension)",
+        Accept: "*/*",
+      },
+    };
+    const req = client.get(url, requestOptions, (res) => {
       const status = res.statusCode ?? 0;
       if (
         (status >= 301 && status <= 303) ||
