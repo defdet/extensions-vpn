@@ -1,4 +1,5 @@
 const SECRET_PREFIX = "remoteProxy.accessKey.";
+const ENTRY_SECRET_PREFIX = "remoteProxy.entryKey.";
 
 export type ErrorCode =
   | "RemoteExecError"
@@ -35,6 +36,13 @@ export interface ScriptEvent {
 
 export function buildSecretKey(authority: string): string {
   return `${SECRET_PREFIX}${authority}`;
+}
+
+// Per-authority namespace for the optional multihop *entry* node key, kept
+// separate from the primary (exit) access key so each host can have its own
+// chain without the two ever colliding.
+export function buildEntrySecretKey(authority: string): string {
+  return `${ENTRY_SECRET_PREFIX}${authority}`;
 }
 
 export function deriveHostFromAuthority(authority: string, configuredHost: string): string {

@@ -44,6 +44,8 @@ After **Proxy: Disable**, do the same Reload Window (and Kill VS Code Server if 
 | Command | Description |
 |---|---|
 | `Proxy: Configure Access Key` | Store access key in VS Code SecretStorage |
+| `Proxy: Configure Entry Node Key (Multihop)` | Store an entry-hop access key to chain through a second server. See [Multihop](#multihop) |
+| `Proxy: Clear Entry Node Key (Multihop)` | Remove the stored entry-hop key and revert to single-hop on the next *Proxy: Enable* |
 | `Proxy: Configure SSH Password` | Store an SSH password for the active Remote-SSH host in VS Code SecretStorage. See [Authentication](#authentication) |
 | `Proxy: Clear SSH Password` | Remove the stored SSH password for the active host |
 | `Proxy: Enable` | Install proxy binary (if needed), start proxy, set remote proxy settings |
@@ -63,7 +65,7 @@ After **Proxy: Disable**, do the same Reload Window (and Kill VS Code Server if 
 | `remoteProxy.socksPort` | `1080` | SOCKS5 bind port on remote |
 | `remoteProxy.httpPort` | `1081` | HTTP CONNECT bind port on remote. Used for `HTTPS_PROXY`/`HTTP_PROXY` env so tools that only speak HTTP CONNECT (e.g. Node `undici`/`fetch`, Claude Code) can use the tunnel |
 | `remoteProxy.shadowsocksVersion` | `v1.24.0` | sslocal release version |
-| `remoteProxy.outlineHelperVersion` | `v0.7.0` | Tag in this repo to pull the `outline-helper` binary from. Used only when an Outline-style salt prefix is configured |
+| `remoteProxy.outlineHelperVersion` | `v0.8.0` | Tag in this repo to pull the `outline-helper` binary from. Used when an Outline-style salt prefix is configured or a [multihop](#multihop) entry node key is set. Multihop needs `v0.8.0`+ |
 | `remoteProxy.outlinePrefixHex` | `16030301c29e02` | Hex-encoded salt prefix for Outline-compatible DPI evasion. Non-empty value switches the backend to `outline-helper`; clear it (or set to `""`) to use plain `sslocal`. See [Bypassing payload-level DPI](#bypassing-payload-level-dpi) |
 | `remoteProxy.testUrl` | `https://api.openai.com/v1/models` | URL for connectivity test |
 | `remoteProxy.testExpectedHttpCodes` | `200,204,301,302,307,308,401,403` | Comma-separated HTTP codes treated as successful |
@@ -75,8 +77,8 @@ After **Proxy: Disable**, do the same Reload Window (and Kill VS Code Server if 
 
 1. Resolves the dynamic access key payload.
 2. Installs the active proxy binary to `~/.extensions-ssproxy/bin/` on the remote host:
-   - `sslocal` (from `shadowsocks/shadowsocks-rust`) when `outlinePrefixHex` is empty
-   - `outline-helper` (built from `tools/outline-helper`, attached to this repo's GitHub releases) when `outlinePrefixHex` is set
+   - `sslocal` (from `shadowsocks/shadowsocks-rust`) when `outlinePrefixHex` is empty and no multihop entry key is set
+   - `outline-helper` (built from `tools/outline-helper`, attached to this repo's GitHub releases) when `outlinePrefixHex` is set **or** a [multihop](#multihop) entry node key is configured
 3. Starts a single process exposing two locals on `127.0.0.1`: SOCKS5 on `socksPort` and HTTP CONNECT on `httpPort` (both auto-fall-back if a port is in use). The active backend is recorded in `~/.extensions-ssproxy/state/active_backend`.
 4. Propagates the proxy through three channels so different extension stacks all see it:
    - `http.proxy = http://127.0.0.1:<httpPort>` + `http.proxySupport = on` in remote machine settings (`~/.vscode-server/data/Machine/settings.json`)
@@ -103,6 +105,33 @@ The extension ships `outline-helper`, a small Go binary built on [outline-sdk](h
 - Default prefix matches what the VanyaVPN client (built on [Outline](https://github.com/Jigsaw-Code/outline-apps)) injects — captured from its `tun2socks -proxyPrefix` argument. If your SS provider uses a different obfuscator, set `remoteProxy.outlinePrefixHex` to its hex-encoded prefix value, or clear it (`""`) to fall back to plain `sslocal`.
 - The setting also accepts a prefix embedded in the access key URL itself: `ss://...?prefix=%16%03%03%01%C2%9E%02` (percent-encoded raw bytes — Outline's URL convention) or `ss://...?prefix=16030301c29e02` (hex). When both are present, the VS Code setting wins.
 - `Proxy: Status` reports the active backend; `Proxy: Show Logs` tails whichever binary is running.
+
+## Multihop
+
+Multihop routes traffic through **two** Shadowsocks servers before it reaches the internet:
+
+```
+you → entry → exit → target
+```
+
+The **exit** hop is your normal access key (the server that egresses to the destination). The **entry** hop is a second server placed in front — it's the only one your local network sees, so it's where DPI evasion (the salt prefix) is applied. Chaining two servers means neither hop alone knows both who you are *and* where you're going.
+
+**Setup:**
+
+1. Configure your normal access key as usual (**Proxy: Configure Access Key**) — this is the exit hop.
+2. Run **Proxy: Configure Entry Node Key (Multihop)** and paste a second `ssconf://`, `ss://`, `https://`, or `http://` key — this is the entry hop.
+3. Run **Proxy: Enable**. *Proxy: Status* will report the backend as `outline-helper (multihop)`.
+
+To go back to single-hop, run **Proxy: Clear Entry Node Key (Multihop)** and **Proxy: Enable** again.
+
+**How it works:** [outline-sdk](https://github.com/Jigsaw-Code/outline-sdk) stream dialers are composable. The extension builds the entry hop's dialer first (dialing the entry server over plain TCP, carrying the salt prefix), then builds the exit hop's dialer so it dials *through* the entry dialer instead of dialing TCP directly. The local SOCKS5/HTTP-CONNECT listeners are served off the exit dialer, so every connection traverses `entry → exit` transparently. No server-side change is required on either hop — both are vanilla AEAD Shadowsocks servers.
+
+**Notes:**
+
+- Multihop always uses the `outline-helper` backend (it's the piece that composes the chain), with or without a salt prefix. Plain `sslocal` is single-hop only.
+- Requires `outline-helper` **v0.8.0 or later** (the release where the helper gained `--entry-*` flags). Bump `remoteProxy.outlineHelperVersion` if you pin an older tag.
+- The salt prefix is applied to the entry hop only. Prefix precedence: `remoteProxy.outlinePrefixHex` setting → entry key's own `prefix` → exit key's `prefix`.
+- Adds one extra network hop of latency. If a hop is down, *Proxy: Test Connectivity* fails the same way a single-hop outage would; *Proxy: Show Logs* identifies which hop failed to dial.
 
 ## Authentication
 

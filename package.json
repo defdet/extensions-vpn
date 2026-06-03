@@ -2,7 +2,7 @@
   "name": "remote-ss-proxy-controller",
   "displayName": "Remote SS Proxy Controller",
   "description": "Manage remote Shadowsocks proxy lifecycle for Remote-SSH from VS Code UI.",
-  "version": "0.7.2",
+  "version": "0.8.0",
   "publisher": "Max",
   "license": "MIT",
   "repository": {
@@ -30,6 +30,14 @@
       {
         "command": "remoteProxy.configureAccessKey",
         "title": "Proxy: Configure Access Key"
+      },
+      {
+        "command": "remoteProxy.configureEntryNodeKey",
+        "title": "Proxy: Configure Entry Node Key (Multihop)"
+      },
+      {
+        "command": "remoteProxy.clearEntryNodeKey",
+        "title": "Proxy: Clear Entry Node Key (Multihop)"
       },
       {
         "command": "remoteProxy.configureSshPassword",
@@ -76,6 +84,12 @@
       "commandPalette": [
         {
           "command": "remoteProxy.configureAccessKey"
+        },
+        {
+          "command": "remoteProxy.configureEntryNodeKey"
+        },
+        {
+          "command": "remoteProxy.clearEntryNodeKey"
         },
         {
           "command": "remoteProxy.configureSshPassword"
@@ -153,8 +167,8 @@
         },
         "remoteProxy.outlineHelperVersion": {
           "type": "string",
-          "default": "v0.7.0",
-          "description": "Release tag in this repo to pull the outline-helper binary from. Only used when an Outline-style salt prefix is configured (via access key or 'remoteProxy.outlinePrefixHex')."
+          "default": "v0.8.0",
+          "description": "Release tag in this repo to pull the outline-helper binary from. Used when an Outline-style salt prefix is configured (via access key or 'remoteProxy.outlinePrefixHex') or when a multihop entry node key is set. Multihop requires v0.8.0 or later (the helper gained --entry-* flags)."
         },
         "remoteProxy.outlinePrefixHex": {
           "type": "string",

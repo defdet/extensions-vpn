@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   buildSecretKey,
+  buildEntrySecretKey,
   deriveHostFromAuthority,
   deriveStatusPatch,
   normalizeProxyError,
@@ -14,7 +15,7 @@ import {
   parseYamlLikePayload,
   resolveAccessKey
 } from "../services/accessKeyResolver";
-import { SETUP_REMOTE_SCRIPT } from "../services/remoteScripts";
+import { SETUP_REMOTE_SCRIPT, REVERT_REMOTE_SCRIPT } from "../services/remoteScripts";
 
 suite("Proxy Core Unit", () => {
   test("buildSecretKey uses per-authority namespace", () => {
@@ -27,6 +28,17 @@ suite("Proxy Core Unit", () => {
   test("deriveHostFromAuthority uses configured override first", () => {
     assert.equal(deriveHostFromAuthority("ssh-remote+gpu_polymer_2", "custom-host"), "custom-host");
     assert.equal(deriveHostFromAuthority("ssh-remote+gpu_polymer_2", ""), "gpu_polymer_2");
+  });
+
+  test("buildEntrySecretKey uses a namespace distinct from the access key", () => {
+    assert.equal(
+      buildEntrySecretKey("ssh-remote+gpu_polymer_2"),
+      "remoteProxy.entryKey.ssh-remote+gpu_polymer_2"
+    );
+    assert.notEqual(
+      buildEntrySecretKey("ssh-remote+gpu_polymer_2"),
+      buildSecretKey("ssh-remote+gpu_polymer_2")
+    );
   });
 
   test("redactLine masks secrets and ss urls", () => {
@@ -101,6 +113,34 @@ suite("Remote Script Unit", () => {
     assert.ok(SETUP_REMOTE_SCRIPT.includes("is_expected_http_code"));
     assert.ok(SETUP_REMOTE_SCRIPT.includes('http_code="$(curl'));
     assert.ok(SETUP_REMOTE_SCRIPT.includes('[ "$http_code" != "000" ]'));
+  });
+
+  test("multihop entry key forces the outline-helper backend", () => {
+    // Backend selection must switch to outline-helper when a prefix, an entry
+    // hop payload, or the multihop signal is present (the latter covers
+    // install/status actions that don't resolve keys).
+    assert.ok(
+      SETUP_REMOTE_SCRIPT.includes(
+        'if [ -n "$OUTLINE_PREFIX_HEX" ] || [ -n "$ENTRY_INFO_B64" ] || [ "$MULTIHOP" = "1" ]; then'
+      )
+    );
+  });
+
+  test("multihop passes --entry-* flags to outline-helper when entry info is set", () => {
+    assert.ok(SETUP_REMOTE_SCRIPT.includes('ENTRY_INFO_B64="\${ENTRY_INFO_B64:-}"'));
+    assert.ok(SETUP_REMOTE_SCRIPT.includes("--entry-server "));
+    assert.ok(SETUP_REMOTE_SCRIPT.includes("--entry-server-port "));
+    assert.ok(SETUP_REMOTE_SCRIPT.includes("--entry-cipher "));
+    assert.ok(SETUP_REMOTE_SCRIPT.includes("--entry-password "));
+    // The entry-flag invocation is guarded by the presence of ENTRY_INFO_B64.
+    assert.ok(SETUP_REMOTE_SCRIPT.includes('if [ -n "$ENTRY_INFO_B64" ]; then'));
+  });
+
+  test("multihop state marker is recorded on start and cleared on revert", () => {
+    assert.ok(SETUP_REMOTE_SCRIPT.includes('MULTIHOP_FILE="$STATE_DIR/multihop"'));
+    assert.ok(SETUP_REMOTE_SCRIPT.includes('echo "1" > "$MULTIHOP_FILE"'));
+    assert.ok(REVERT_REMOTE_SCRIPT.includes('MULTIHOP_FILE="$STATE_DIR/multihop"'));
+    assert.ok(REVERT_REMOTE_SCRIPT.includes('"$MULTIHOP_FILE"'));
   });
 });
 

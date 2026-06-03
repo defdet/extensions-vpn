@@ -208,7 +208,7 @@ export function fetchUrl(url: string, depth = 0): Promise<string> {
       timeout: 20_000,
       headers: {
         // Some providers fail (HTTP 500) when User-Agent is absent.
-        "User-Agent": "remote-ss-proxy-controller/0.7",
+        "User-Agent": "remote-ss-proxy-controller/0.8.0 (vscode-extension)",
         Accept: "application/json,text/plain,*/*",
       },
     }, (res) => {
