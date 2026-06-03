@@ -1,4 +1,4 @@
-module github.com/defdet/extensions-vpn/tools/outline-helper
+module github.com/VictorAboba/extensions-vpn/tools/outline-helper
 
 go 1.21
 

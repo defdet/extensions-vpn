@@ -8,6 +8,7 @@ import { runLocalScript } from "./localRunner";
 import {
   type ActionName,
   buildSecretKey,
+  buildEntrySecretKey,
   deriveHostFromAuthority,
   deriveStatusPatch,
   normalizeProxyError,
@@ -100,6 +101,52 @@ export class ProxyService {
     await this.refreshUi();
   }
 
+  public async configureEntryNodeKey(): Promise<void> {
+    const authority = this.getAuthority();
+    const input = await vscode.window.showInputBox({
+      title: "Configure Multihop Entry Node Key",
+      prompt:
+        "Entry-hop access key (ssconf://, ss://, https:// or http://). Traffic flows you → entry → exit. The exit hop is your existing access key.",
+      password: true,
+      ignoreFocusOut: true,
+      placeHolder: "ssconf://...",
+      validateInput: (value) => {
+        const trimmed = value.trim();
+        if (!trimmed) {
+          return "Entry node key is required (clear it via 'Proxy: Clear Entry Node Key').";
+        }
+        if (/^(ssconf|ss|https?|http):\/\//i.test(trimmed)) {
+          return undefined;
+        }
+        return "Access key must start with ssconf://, ss://, https://, or http://";
+      }
+    });
+    if (!input) {
+      return;
+    }
+    await this.context.secrets.store(buildEntrySecretKey(authority), input.trim());
+    await vscode.window.showInformationMessage(
+      `Multihop entry node key saved for ${authority}. Run 'Proxy: Enable' to apply the chain.`
+    );
+    await this.refreshUi();
+  }
+
+  public async clearEntryNodeKey(): Promise<void> {
+    const authority = this.getAuthority();
+    const existing = await this.context.secrets.get(buildEntrySecretKey(authority));
+    if (!existing) {
+      await vscode.window.showInformationMessage(
+        `No multihop entry node key configured for ${authority}.`
+      );
+      return;
+    }
+    await this.context.secrets.delete(buildEntrySecretKey(authority));
+    await vscode.window.showInformationMessage(
+      `Cleared multihop entry node key for ${authority}. Run 'Proxy: Enable' to revert to single-hop.`
+    );
+    await this.refreshUi();
+  }
+
   public async enable(): Promise<void> {
     const authority = this.getAuthority();
     const isLocal = authority === "local";
@@ -116,6 +163,8 @@ export class ProxyService {
       return;
     }
 
+    const entryKey = await this.context.secrets.get(buildEntrySecretKey(authority));
+
     const cfg = this.getConfig();
     await this.executeWithStatus(authority, "enable", async () => {
       this.output.appendLine("[INFO] Resolving access key payload...");
@@ -128,7 +177,25 @@ export class ProxyService {
         throw error;
       }
       this.output.appendLine(`[OK] Key resolved via ${runtime.source}. ${runtime.summary}`);
-      await this.runSetupAction("up", host, cfg, runtime, key, isLocal);
+
+      // Multihop: resolve the optional entry-node key. The exit hop is the
+      // primary access key above; the entry hop is what the local network sees.
+      let entryRuntime: AccessKeyRuntime | undefined;
+      if (entryKey) {
+        this.output.appendLine("[INFO] Resolving multihop entry node key...");
+        try {
+          entryRuntime = await resolveAccessKey(entryKey);
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : `${error ?? "unknown error"}`;
+          this.output.appendLine(`[ERROR] Entry node key resolution failed: ${reason}`);
+          throw error;
+        }
+        this.output.appendLine(
+          `[OK] Entry node resolved via ${entryRuntime.source}. Chain: entry(${entryRuntime.summary}) → exit(${runtime.summary})`
+        );
+      }
+
+      await this.runSetupAction("up", host, cfg, runtime, key, isLocal, entryRuntime, entryKey);
       const claudeHint = cfg.wrapClaudeCode
         ? " If a Claude Code session is open, close and reopen it (or reload the window) so the wrapped 'claude' binary is used."
         : "";
@@ -283,6 +350,8 @@ export class ProxyService {
         { label: "Show Logs", command: "remoteProxy.showLogs" },
         { label: "Reinstall sslocal", command: "remoteProxy.reinstallSslocal" },
         { label: "Configure Access Key", command: "remoteProxy.configureAccessKey" },
+        { label: "Configure Entry Node Key (Multihop)", command: "remoteProxy.configureEntryNodeKey" },
+        { label: "Clear Entry Node Key (Multihop)", command: "remoteProxy.clearEntryNodeKey" },
         { label: `Select Cluster Profile (${profileLabel})`, command: "remoteProxy.selectProfile" }
       ],
       {
@@ -568,7 +637,9 @@ export class ProxyService {
     cfg: RemoteProxyConfig,
     runtime?: AccessKeyRuntime,
     accessKey?: string,
-    isLocal?: boolean
+    isLocal?: boolean,
+    entryRuntime?: AccessKeyRuntime,
+    entryKey?: string
   ): Promise<ScriptRunResult> {
     const envVars: Record<string, string> = {
       ACTION: action,
@@ -584,13 +655,26 @@ export class ProxyService {
     if (runtime) {
       envVars.SERVER_INFO_B64 = runtime.serverInfoB64;
     }
-    // Effective prefix: explicit VS Code setting wins over what the key carries
-    // (so the user can fix a key in flight without re-pasting it).
-    const effectivePrefix = cfg.outlinePrefixHex || runtime?.prefixHex || "";
+    // Multihop: when an entry hop is resolved (the 'up' path), hand its server
+    // info to the script. Its presence flips the backend to outline-helper.
+    if (entryRuntime) {
+      envVars.ENTRY_INFO_B64 = entryRuntime.serverInfoB64;
+    }
+    // Backend parity for actions that don't resolve keys (install/status/etc.):
+    // signal multihop from the mere existence of a stored entry key, so they
+    // target the same backend the running proxy uses even when no prefix is set.
+    if (await this.context.secrets.get(buildEntrySecretKey(this.getAuthority()))) {
+      envVars.MULTIHOP = "1";
+    }
+    // Effective prefix: explicit VS Code setting wins over what a key carries.
+    // In multihop the prefix lands on the entry hop (first on the wire), so the
+    // entry key's own prefix takes precedence over the exit key's.
+    const effectivePrefix =
+      cfg.outlinePrefixHex || entryRuntime?.prefixHex || runtime?.prefixHex || "";
     if (effectivePrefix) {
       envVars.OUTLINE_PREFIX_HEX = effectivePrefix;
     }
-    const secrets = accessKey ? [accessKey] : [];
+    const secrets = [accessKey, entryKey].filter((s): s is string => Boolean(s));
     return this.executeScript(host, SETUP_REMOTE_SCRIPT, envVars, secrets, isLocal);
   }
 

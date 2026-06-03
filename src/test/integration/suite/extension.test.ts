@@ -6,6 +6,8 @@ suite("Extension Smoke", () => {
     const commands = await vscode.commands.getCommands(true);
     const expected = [
       "remoteProxy.configureAccessKey",
+      "remoteProxy.configureEntryNodeKey",
+      "remoteProxy.clearEntryNodeKey",
       "remoteProxy.enable",
       "remoteProxy.disable",
       "remoteProxy.status",

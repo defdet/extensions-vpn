@@ -3,8 +3,16 @@
 // for DPI evasion (Outline-compatible).
 //
 // Drop-in replacement for sslocal's listener role, used by the extension only
-// when the access key carries a `prefix_hex` value. Built from outline-sdk so
-// the prefix mechanism matches what outline-ss-server expects.
+// when the access key carries a `prefix_hex` value, or when a multihop chain
+// is configured. Built from outline-sdk so the prefix mechanism matches what
+// outline-ss-server expects.
+//
+// Multihop: when an entry hop is supplied (--entry-* flags), traffic is routed
+// you -> entry -> exit -> target. outline-sdk dialers are composable, so the
+// exit hop simply dials *through* the entry hop's StreamDialer instead of
+// dialing TCP directly. The salt prefix is applied to the entry hop only,
+// because that is the single ShadowSocks handshake visible to DPI on the local
+// network; the inner exit handshake is already wrapped inside the entry tunnel.
 
 package main
 
@@ -33,14 +41,18 @@ var version = "dev"
 
 func main() {
 	var (
-		server      = flag.String("server", "", "SS server host (required)")
-		serverPort  = flag.Int("server-port", 0, "SS server port (required)")
-		cipher      = flag.String("cipher", "", "SS cipher, e.g. chacha20-ietf-poly1305 (required)")
-		password    = flag.String("password", "", "SS password (required)")
-		prefixHex   = flag.String("prefix-hex", "", "Hex-encoded salt prefix bytes; empty disables prefix injection")
-		socksAddr   = flag.String("socks-listen", "127.0.0.1:1080", "SOCKS5 listen address; empty disables SOCKS")
-		httpAddr    = flag.String("http-listen", "", "HTTP CONNECT listen address; empty disables HTTP")
-		showVersion = flag.Bool("version", false, "Print version and exit")
+		server          = flag.String("server", "", "Exit SS server host (required)")
+		serverPort      = flag.Int("server-port", 0, "Exit SS server port (required)")
+		cipher          = flag.String("cipher", "", "Exit SS cipher, e.g. chacha20-ietf-poly1305 (required)")
+		password        = flag.String("password", "", "Exit SS password (required)")
+		entryServer     = flag.String("entry-server", "", "Entry SS server host for multihop; empty disables multihop")
+		entryServerPort = flag.Int("entry-server-port", 0, "Entry SS server port (required when --entry-server is set)")
+		entryCipher     = flag.String("entry-cipher", "", "Entry SS cipher (required when --entry-server is set)")
+		entryPassword   = flag.String("entry-password", "", "Entry SS password (required when --entry-server is set)")
+		prefixHex       = flag.String("prefix-hex", "", "Hex-encoded salt prefix bytes; applied to the entry hop in multihop, else the single hop; empty disables prefix injection")
+		socksAddr       = flag.String("socks-listen", "127.0.0.1:1080", "SOCKS5 listen address; empty disables SOCKS")
+		httpAddr        = flag.String("http-listen", "", "HTTP CONNECT listen address; empty disables HTTP")
+		showVersion     = flag.Bool("version", false, "Print version and exit")
 	)
 	flag.Parse()
 	if *showVersion {
@@ -54,22 +66,54 @@ func main() {
 		log.Fatal("at least one of --socks-listen / --http-listen must be set")
 	}
 
-	key, err := shadowsocks.NewEncryptionKey(*cipher, *password)
-	if err != nil {
-		log.Fatalf("encryption key: %v", err)
+	multihop := *entryServer != ""
+	if multihop && (*entryServerPort == 0 || *entryCipher == "" || *entryPassword == "") {
+		log.Fatal("--entry-server-port, --entry-cipher, --entry-password are required when --entry-server is set")
 	}
-	endpoint := &transport.TCPEndpoint{Address: net.JoinHostPort(*server, strconv.Itoa(*serverPort))}
-	dialer, err := shadowsocks.NewStreamDialer(endpoint, key)
-	if err != nil {
-		log.Fatalf("stream dialer: %v", err)
-	}
+
+	var prefix []byte
 	if *prefixHex != "" {
-		prefix, err := hex.DecodeString(*prefixHex)
+		p, err := hex.DecodeString(*prefixHex)
 		if err != nil {
 			log.Fatalf("invalid --prefix-hex %q: %v", *prefixHex, err)
 		}
-		dialer.SaltGenerator = shadowsocks.NewPrefixSaltGenerator(prefix)
-		log.Printf("salt prefix enabled: %d bytes hex=%s", len(prefix), *prefixHex)
+		prefix = p
+	}
+
+	// Build the dialer chain. In multihop, the entry hop dials TCP directly and
+	// carries the salt prefix (it is the only handshake on the local wire); the
+	// exit hop then dials *through* the entry dialer. In single-hop, the exit
+	// hop dials TCP directly and carries the prefix.
+	var dialer transport.StreamDialer
+	if multihop {
+		entryDialer, err := newSSDialer(
+			net.JoinHostPort(*entryServer, strconv.Itoa(*entryServerPort)),
+			*entryCipher, *entryPassword, nil, prefix,
+		)
+		if err != nil {
+			log.Fatalf("entry hop: %v", err)
+		}
+		exitDialer, err := newSSDialer(
+			net.JoinHostPort(*server, strconv.Itoa(*serverPort)),
+			*cipher, *password, entryDialer, nil,
+		)
+		if err != nil {
+			log.Fatalf("exit hop: %v", err)
+		}
+		dialer = exitDialer
+		log.Printf("multihop enabled: entry=%s:%d -> exit=%s:%d", *entryServer, *entryServerPort, *server, *serverPort)
+	} else {
+		d, err := newSSDialer(
+			net.JoinHostPort(*server, strconv.Itoa(*serverPort)),
+			*cipher, *password, nil, prefix,
+		)
+		if err != nil {
+			log.Fatalf("stream dialer: %v", err)
+		}
+		dialer = d
+	}
+	if len(prefix) > 0 {
+		log.Printf("salt prefix enabled: %d bytes hex=%s (applied to %s hop)", len(prefix), *prefixHex, hopLabel(multihop))
 	} else {
 		log.Printf("salt prefix disabled (plain SS handshake)")
 	}
@@ -95,6 +139,38 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	s := <-sigCh
 	log.Printf("received %v, exiting", s)
+}
+
+// newSSDialer builds a ShadowSocks StreamDialer for one hop. When inner is nil
+// the hop dials its server over plain TCP; otherwise it dials *through* inner
+// (the previous hop's dialer), which is how the chain is composed. A non-empty
+// prefix installs the Outline-compatible salt-prefix generator on this hop.
+func newSSDialer(addr, cipher, password string, inner transport.StreamDialer, prefix []byte) (*shadowsocks.StreamDialer, error) {
+	key, err := shadowsocks.NewEncryptionKey(cipher, password)
+	if err != nil {
+		return nil, fmt.Errorf("encryption key: %w", err)
+	}
+	var endpoint transport.StreamEndpoint
+	if inner == nil {
+		endpoint = &transport.TCPEndpoint{Address: addr}
+	} else {
+		endpoint = &transport.StreamDialerEndpoint{Dialer: inner, Address: addr}
+	}
+	dialer, err := shadowsocks.NewStreamDialer(endpoint, key)
+	if err != nil {
+		return nil, fmt.Errorf("stream dialer: %w", err)
+	}
+	if len(prefix) > 0 {
+		dialer.SaltGenerator = shadowsocks.NewPrefixSaltGenerator(prefix)
+	}
+	return dialer, nil
+}
+
+func hopLabel(multihop bool) string {
+	if multihop {
+		return "entry"
+	}
+	return "single"
 }
 
 // ----- SOCKS5 (CONNECT only, no auth) ---------------------------------------

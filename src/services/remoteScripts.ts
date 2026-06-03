@@ -17,9 +17,13 @@ SOCKS_PORT="\${SOCKS_PORT:-1080}"
 HTTP_PORT="\${HTTP_PORT:-1081}"
 SS_VERSION="\${SS_VERSION:-v1.24.0}"
 OUTLINE_HELPER_VERSION="\${OUTLINE_HELPER_VERSION:-v0.7.0}"
-OUTLINE_HELPER_REPO="\${OUTLINE_HELPER_REPO:-defdet/extensions-vpn}"
+OUTLINE_HELPER_REPO="\${OUTLINE_HELPER_REPO:-VictorAboba/extensions-vpn}"
 OUTLINE_PREFIX_HEX="\${OUTLINE_PREFIX_HEX:-}"
 SERVER_INFO_B64="\${SERVER_INFO_B64:-}"
+ENTRY_INFO_B64="\${ENTRY_INFO_B64:-}"
+# MULTIHOP=1 signals that an entry hop is configured even on actions that don't
+# resolve keys (install/status), so they target the same backend as 'up'.
+MULTIHOP="\${MULTIHOP:-}"
 TEST_URL="\${TEST_URL:-https://api.openai.com/v1/models}"
 TEST_EXPECTED_HTTP_CODES="\${TEST_EXPECTED_HTTP_CODES:-200,204,301,302,307,308,401,403}"
 TAIL_LINES="\${TAIL_LINES:-80}"
@@ -38,6 +42,7 @@ SOCKS_PORT_FILE="$STATE_DIR/socks_port"
 HTTP_PORT_FILE="$STATE_DIR/http_port"
 PROXY_URL_FILE="$STATE_DIR/proxy_url"
 ACTIVE_BACKEND_FILE="$STATE_DIR/active_backend"
+MULTIHOP_FILE="$STATE_DIR/multihop"
 ENV_SETUP_FILE="$HOME/.vscode-server/server-env-setup"
 
 # Detect host OS for cross-platform support
@@ -56,10 +61,10 @@ else
   OUTLINE_HELPER_BIN="$BIN_DIR/outline-helper"
 fi
 
-# Backend selection: when OUTLINE_PREFIX_HEX is non-empty we route through the
-# Outline-compatible helper (salt-prefix injection bypasses DPI on networks
-# that filter bare ShadowSocks). Otherwise we use vanilla sslocal.
-if [ -n "$OUTLINE_PREFIX_HEX" ]; then
+# Backend selection: route through the Outline-compatible helper when either a
+# salt prefix is set (DPI evasion) or a multihop entry hop is configured (the
+# helper composes the dialer chain). Otherwise use vanilla sslocal.
+if [ -n "$OUTLINE_PREFIX_HEX" ] || [ -n "$ENTRY_INFO_B64" ] || [ "$MULTIHOP" = "1" ]; then
   ACTIVE_BACKEND="outline-helper"
 else
   ACTIVE_BACKEND="sslocal"
@@ -563,16 +568,56 @@ PY
   helper_cipher="$(printf '%s\n' "$helper_args" | sed -n '3p')"
   helper_password="$(printf '%s\n' "$helper_args" | sed -n '4p')"
 
+  # Multihop: when ENTRY_INFO_B64 is set, decode the entry hop and prepend its
+  # flags so outline-helper routes you -> entry -> exit -> target. The exit hop
+  # stays in the --server/--cipher/--password flags above.
+  if [ -n "$ENTRY_INFO_B64" ]; then
+    local entry_decoded
+    entry_decoded="$(ENTRY_INFO_B64="$ENTRY_INFO_B64" "$py_bin" - <<'PY'
+import base64, json, os
+info = json.loads(base64.b64decode(os.environ["ENTRY_INFO_B64"]).decode("utf-8"))
+print(info["server"])
+print(int(info["server_port"]))
+print(info["method"])
+print(info["password"])
+PY
+)" || {
+      log ERROR "Failed to decode ENTRY_INFO_B64 for outline-helper multihop."
+      return 12
+    }
+    local entry_server entry_port entry_cipher entry_password
+    entry_server="$(printf '%s\n' "$entry_decoded" | sed -n '1p')"
+    entry_port="$(printf '%s\n' "$entry_decoded" | sed -n '2p')"
+    entry_cipher="$(printf '%s\n' "$entry_decoded" | sed -n '3p')"
+    entry_password="$(printf '%s\n' "$entry_decoded" | sed -n '4p')"
+  fi
+
   : > "$LOG_FILE"
-  nohup "$OUTLINE_HELPER_BIN" \\
-    --server "$helper_server" \\
-    --server-port "$helper_port" \\
-    --cipher "$helper_cipher" \\
-    --password "$helper_password" \\
-    --prefix-hex "$OUTLINE_PREFIX_HEX" \\
-    --socks-listen "127.0.0.1:\${SOCKS_PORT}" \\
-    --http-listen "127.0.0.1:\${HTTP_PORT}" \\
-    >>"$LOG_FILE" 2>&1 &
+  if [ -n "$ENTRY_INFO_B64" ]; then
+    nohup "$OUTLINE_HELPER_BIN" \\
+      --server "$helper_server" \\
+      --server-port "$helper_port" \\
+      --cipher "$helper_cipher" \\
+      --password "$helper_password" \\
+      --entry-server "$entry_server" \\
+      --entry-server-port "$entry_port" \\
+      --entry-cipher "$entry_cipher" \\
+      --entry-password "$entry_password" \\
+      --prefix-hex "$OUTLINE_PREFIX_HEX" \\
+      --socks-listen "127.0.0.1:\${SOCKS_PORT}" \\
+      --http-listen "127.0.0.1:\${HTTP_PORT}" \\
+      >>"$LOG_FILE" 2>&1 &
+  else
+    nohup "$OUTLINE_HELPER_BIN" \\
+      --server "$helper_server" \\
+      --server-port "$helper_port" \\
+      --cipher "$helper_cipher" \\
+      --password "$helper_password" \\
+      --prefix-hex "$OUTLINE_PREFIX_HEX" \\
+      --socks-listen "127.0.0.1:\${SOCKS_PORT}" \\
+      --http-listen "127.0.0.1:\${HTTP_PORT}" \\
+      >>"$LOG_FILE" 2>&1 &
+  fi
   local pid="$!"
   if [ "$HOST_OS" = "windows" ]; then
     disown "$pid" 2>/dev/null || true
@@ -580,7 +625,11 @@ PY
   echo "$pid" > "$PID_FILE"
   sleep 2
   if kill -0 "$pid" 2>/dev/null; then
-    log OK "outline-helper started (pid=$pid), socks=127.0.0.1:\${SOCKS_PORT}, http=127.0.0.1:\${HTTP_PORT}, prefix=$OUTLINE_PREFIX_HEX"
+    if [ -n "$ENTRY_INFO_B64" ]; then
+      log OK "outline-helper started (pid=$pid, multihop), socks=127.0.0.1:\${SOCKS_PORT}, http=127.0.0.1:\${HTTP_PORT}, prefix=$OUTLINE_PREFIX_HEX"
+    else
+      log OK "outline-helper started (pid=$pid), socks=127.0.0.1:\${SOCKS_PORT}, http=127.0.0.1:\${HTTP_PORT}, prefix=$OUTLINE_PREFIX_HEX"
+    fi
   else
     log ERROR "outline-helper failed to start. Last log lines:"
     tail -n 50 "$LOG_FILE" || true
@@ -615,6 +664,11 @@ start_sslocal() {
   echo "$HTTP_PORT" > "$HTTP_PORT_FILE"
   printf '[actual-ports] socks=%s http=%s\n' "$SOCKS_PORT" "$HTTP_PORT"
   echo "$ACTIVE_BACKEND" > "$ACTIVE_BACKEND_FILE"
+  if [ -n "$ENTRY_INFO_B64" ]; then
+    echo "1" > "$MULTIHOP_FILE"
+  else
+    rm -f "$MULTIHOP_FILE"
+  fi
 
   if [ "$ACTIVE_BACKEND" = "outline-helper" ]; then
     _launch_outline_helper || return $?
@@ -995,6 +1049,9 @@ status_sslocal() {
   if [ -f "$ACTIVE_BACKEND_FILE" ]; then
     recorded_backend="$(cat "$ACTIVE_BACKEND_FILE" 2>/dev/null || echo unknown)"
   fi
+  if [ -f "$MULTIHOP_FILE" ]; then
+    recorded_backend="$recorded_backend (multihop)"
+  fi
   if is_running; then
     local pid=""
     if [ -f "$PID_FILE" ]; then
@@ -1170,6 +1227,7 @@ SOCKS_PORT_FILE="$STATE_DIR/socks_port"
 HTTP_PORT_FILE="$STATE_DIR/http_port"
 PROXY_URL_FILE="$STATE_DIR/proxy_url"
 ACTIVE_BACKEND_FILE="$STATE_DIR/active_backend"
+MULTIHOP_FILE="$STATE_DIR/multihop"
 ENV_SETUP_FILE="$HOME/.vscode-server/server-env-setup"
 
 # Detect host OS for cross-platform support
@@ -1469,7 +1527,7 @@ set_vscode_proxy_disable "$TERM_KEY"
 clear_server_env_setup
 unwrap_claude_code
 
-rm -f "$SSLOCAL_BIN" "$OUTLINE_HELPER_BIN" "$CFG_FILE" "$LAUNCH_CFG_FILE" "$SOCKS_PORT_FILE" "$HTTP_PORT_FILE" "$PROXY_URL_FILE" "$ACTIVE_BACKEND_FILE" >/dev/null 2>&1 || true
+rm -f "$SSLOCAL_BIN" "$OUTLINE_HELPER_BIN" "$CFG_FILE" "$LAUNCH_CFG_FILE" "$SOCKS_PORT_FILE" "$HTTP_PORT_FILE" "$PROXY_URL_FILE" "$ACTIVE_BACKEND_FILE" "$MULTIHOP_FILE" >/dev/null 2>&1 || true
 
 if [ "$REMOVE_ALL_STATE" = "1" ]; then
   rm -rf "$BASE_DIR" >/dev/null 2>&1 || true
