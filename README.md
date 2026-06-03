@@ -1,13 +1,13 @@
 # Remote SS Proxy Controller
 
-[![CI](https://github.com/VictorAboba/extensions-vpn/actions/workflows/ci.yml/badge.svg)](https://github.com/VictorAboba/extensions-vpn/actions)
-[![Release](https://img.shields.io/github/v/release/VictorAboba/extensions-vpn)](https://github.com/VictorAboba/extensions-vpn/releases/latest)
+[![CI](https://github.com/defdet/extensions-vpn/actions/workflows/ci.yml/badge.svg)](https://github.com/defdet/extensions-vpn/actions)
+[![Release](https://img.shields.io/github/v/release/defdet/extensions-vpn)](https://github.com/defdet/extensions-vpn/releases/latest)
 
 A VS Code extension that manages a remote Shadowsocks SOCKS proxy for **Remote-SSH** sessions. It installs and controls a Shadowsocks client on the remote host (`sslocal` for plain SS, or `outline-helper` for networks where bare SS is fingerprinted by DPI), then configures VS Code's proxy settings so that all extensions respecting `http.proxy` route traffic through the tunnel.
 
 ## Install
 
-1. Go to [**Releases**](https://github.com/VictorAboba/extensions-vpn/releases/latest) and download the `.vsix` file.
+1. Go to [**Releases**](https://github.com/defdet/extensions-vpn/releases/latest) and download the `.vsix` file.
 2. Install it:
 
 ```

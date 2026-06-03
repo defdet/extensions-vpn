@@ -7,9 +7,9 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/VictorAboba/extensions-vpn.git"
+    "url": "https://github.com/defdet/extensions-vpn.git"
   },
-  "homepage": "https://github.com/VictorAboba/extensions-vpn#readme",
+  "homepage": "https://github.com/defdet/extensions-vpn#readme",
   "icon": "extension_icon.jpg",
   "engines": {
     "vscode": "^1.95.0"
