@@ -204,16 +204,14 @@ export function fetchUrl(url: string, depth = 0): Promise<string> {
   }
   return new Promise((resolve, reject) => {
     const client = url.startsWith("https://") ? https : http;
-    // Some dynamic-key providers gate responses on a real User-Agent and return
-    // 5xx/403 to bare Node requests (which send no UA header by default).
-    const requestOptions = {
+    const req = client.get(url, {
       timeout: 20_000,
       headers: {
-        "User-Agent": "remote-ss-proxy-controller/0.7.2 (vscode-extension)",
-        Accept: "*/*",
+        // Some providers fail (HTTP 500) when User-Agent is absent.
+        "User-Agent": "remote-ss-proxy-controller/0.7",
+        Accept: "application/json,text/plain,*/*",
       },
-    };
-    const req = client.get(url, requestOptions, (res) => {
+    }, (res) => {
       const status = res.statusCode ?? 0;
       if (
         (status >= 301 && status <= 303) ||
@@ -403,7 +401,9 @@ export async function resolveAccessKey(key: string): Promise<AccessKeyRuntime> {
         prefix_hex:
           typeof obj.prefix_hex === "string" && obj.prefix_hex
             ? decodePrefixValue(obj.prefix_hex) || undefined
-            : undefined,
+            : typeof obj.prefix === "string" && obj.prefix
+              ? decodePrefixValue(obj.prefix) || undefined
+              : undefined,
       };
     } else if (obj.transport?.tcp) {
       const tcp = obj.transport.tcp;
