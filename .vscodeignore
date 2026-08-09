@@ -6,4 +6,7 @@ tsconfig.json
 **/*.test.*
 node_modules/**
 .github/**
+.vscode/**
+private/**
+*.vsix
 EXTENSION_CONVERSION_PLAN.md

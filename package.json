@@ -225,7 +225,7 @@
         "remoteProxy.wrapClaudeCode": {
           "type": "boolean",
           "default": true,
-          "description": "Auto-wrap the Anthropic Claude Code extension's bundled 'claude' native binary so it inherits HTTPS_PROXY when launched by the extension host (which strips proxy env). Restored on Proxy: Disable. Linux/macOS only."
+          "description": "Make the Anthropic Claude Code extension inherit HTTPS_PROXY when the extension host launches it (the host strips proxy env). Sets 'claudeCode.environmentVariables' on every platform, and additionally shims the bundled 'claude' binary on Linux/macOS (Windows ships a native claude.exe that cannot be shimmed). Both are undone on Proxy: Disable."
         }
       }
     }

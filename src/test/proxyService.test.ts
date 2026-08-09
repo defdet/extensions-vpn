@@ -142,6 +142,54 @@ suite("Remote Script Unit", () => {
     assert.ok(REVERT_REMOTE_SCRIPT.includes('MULTIHOP_FILE="$STATE_DIR/multihop"'));
     assert.ok(REVERT_REMOTE_SCRIPT.includes('"$MULTIHOP_FILE"'));
   });
+
+  test("enable injects proxy env into the Claude Code extension launch env", () => {
+    // The only channel that reaches claude.exe on Windows, where a native
+    // binary cannot be replaced by a shell shim.
+    assert.ok(SETUP_REMOTE_SCRIPT.includes('CLAUDE_ENV_KEY = "claudeCode.environmentVariables"'));
+    assert.ok(SETUP_REMOTE_SCRIPT.includes("def set_claude_env(data, proxy_url):"));
+    assert.ok(SETUP_REMOTE_SCRIPT.includes('set_claude_env(data, proxy_url if wrap_claude else "")'));
+    assert.ok(SETUP_REMOTE_SCRIPT.includes('WRAP_CLAUDE_CODE="$WRAP_CLAUDE_CODE"'));
+  });
+
+  test("claude env injection keeps user-authored entries", () => {
+    assert.ok(
+      SETUP_REMOTE_SCRIPT.includes('if isinstance(e, dict) and e.get("name") not in PROXY_ENV_KEYS')
+    );
+    assert.ok(SETUP_REMOTE_SCRIPT.includes("data.pop(CLAUDE_ENV_KEY, None)"));
+  });
+
+  test("windows takes the env-injection path instead of a binary shim", () => {
+    const winBranch = SETUP_REMOTE_SCRIPT.indexOf('if [ "$HOST_OS" = "windows" ]; then\n    log OK "Claude Code on Windows');
+    assert.ok(winBranch > 0);
+    // The proxy URL state file is written before the platform split so the
+    // POSIX shim and the Windows path share it.
+    assert.ok(
+      SETUP_REMOTE_SCRIPT.indexOf('echo "$proxy_url" > "$PROXY_URL_FILE"') < winBranch
+    );
+    assert.ok(!SETUP_REMOTE_SCRIPT.includes("Skipping Claude Code wrap on Windows"));
+  });
+
+  test("wrap/unwrap cover both bundled native binary layouts", () => {
+    assert.ok(SETUP_REMOTE_SCRIPT.includes("claude_native_dirs()"));
+    assert.ok(SETUP_REMOTE_SCRIPT.includes('echo "$d/resources/native-binary"'));
+    assert.ok(SETUP_REMOTE_SCRIPT.includes('for sub in "$d"/resources/native-binaries/*; do'));
+    assert.ok(SETUP_REMOTE_SCRIPT.includes("done < <(claude_native_dirs)"));
+    assert.ok(REVERT_REMOTE_SCRIPT.includes("done < <(claude_native_dirs)"));
+  });
+
+  test("scripts honor VS Code paths supplied by the extension host", () => {
+    for (const script of [SETUP_REMOTE_SCRIPT, REVERT_REMOTE_SCRIPT]) {
+      assert.ok(script.includes('if [ -n "${VSCODE_SETTINGS_PATH:-}" ]; then'));
+      assert.ok(script.includes('VSCODE_MACHINE_SETTINGS="$VSCODE_SETTINGS_PATH"'));
+      assert.ok(script.includes('VSCODE_EXT_ROOT="$VSCODE_EXT_DIR"'));
+    }
+  });
+
+  test("revert strips injected claude env vars", () => {
+    assert.ok(REVERT_REMOTE_SCRIPT.includes('CLAUDE_ENV_KEY = "claudeCode.environmentVariables"'));
+    assert.ok(REVERT_REMOTE_SCRIPT.includes("data.pop(CLAUDE_ENV_KEY, None)"));
+  });
 });
 
 suite("Access Key Resolver Unit", () => {

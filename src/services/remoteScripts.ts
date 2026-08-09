@@ -87,6 +87,16 @@ else
   VSCODE_EXT_ROOT="$HOME/.vscode/extensions"
 fi
 
+# In local mode the extension host knows its own paths and passes them in
+# (forward-slashed, so they work under Git Bash). This covers Insiders,
+# VSCodium, portable installs, and a custom --extensions-dir.
+if [ -n "\${VSCODE_SETTINGS_PATH:-}" ]; then
+  VSCODE_MACHINE_SETTINGS="$VSCODE_SETTINGS_PATH"
+fi
+if [ -n "\${VSCODE_EXT_DIR:-}" ]; then
+  VSCODE_EXT_ROOT="$VSCODE_EXT_DIR"
+fi
+
 mkdir -p "$BIN_DIR" "$STATE_DIR" "$LOG_DIR" "$TMP_DIR"
 mkdir -p "$(dirname "$VSCODE_MACHINE_SETTINGS")"
 
@@ -686,6 +696,7 @@ set_vscode_proxy() {
   local py_bin
   py_bin="$(find_python)"
   PROXY_URL="$proxy_url" PROXY_MODE="$mode" TERM_KEY="$term_key" \\
+  WRAP_CLAUDE_CODE="$WRAP_CLAUDE_CODE" \\
     "$py_bin" - "$VSCODE_MACHINE_SETTINGS" <<'PY'
 import json
 import os
@@ -699,6 +710,7 @@ path = pathlib.Path(sys.argv[1]).expanduser()
 mode = os.environ["PROXY_MODE"]
 proxy_url = os.environ["PROXY_URL"]
 term_key = os.environ["TERM_KEY"]
+wrap_claude = os.environ.get("WRAP_CLAUDE_CODE", "1") == "1"
 
 def strip_jsonc(text: str) -> str:
     result = []
@@ -754,6 +766,36 @@ else:
     data = {}
 
 PROXY_ENV_KEYS = ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy", "NO_PROXY", "no_proxy")
+NO_PROXY_VALUE = "localhost,127.0.0.1,::1"
+CLAUDE_ENV_KEY = "claudeCode.environmentVariables"
+
+def set_claude_env(data, proxy_url):
+    """Merge our proxy vars into the Claude Code extension's launch env.
+
+    The extension spawns its bundled 'claude' binary with
+    {...process.env, ...claudeCode.environmentVariables}, so this is the only
+    injection point that works on Windows (where a native .exe cannot be
+    replaced by a shell shim). Entries the user added themselves are kept.
+    """
+    existing = data.get(CLAUDE_ENV_KEY)
+    if isinstance(existing, dict):
+        existing = [{"name": k, "value": v} for k, v in existing.items()]
+    if not isinstance(existing, list):
+        existing = []
+    kept = [
+        e for e in existing
+        if isinstance(e, dict) and e.get("name") not in PROXY_ENV_KEYS
+    ]
+    if proxy_url:
+        kept += [
+            {"name": k, "value": NO_PROXY_VALUE if "NO_PROXY" in k.upper() else proxy_url}
+            for k in PROXY_ENV_KEYS
+        ]
+    if kept:
+        data[CLAUDE_ENV_KEY] = kept
+    else:
+        data.pop(CLAUDE_ENV_KEY, None)
+    return len([e for e in kept if e.get("name") in PROXY_ENV_KEYS])
 
 before = {
     "http.proxy": data.get("http.proxy", "<unset>"),
@@ -774,6 +816,7 @@ if mode == "enable":
     term_env["NO_PROXY"] = "localhost,127.0.0.1,::1"
     term_env["no_proxy"] = "localhost,127.0.0.1,::1"
     data[term_key] = term_env
+    claude_count = set_claude_env(data, proxy_url if wrap_claude else "")
     for k in ("remote.SSH.httpProxy", "remote.SSH.httpsProxy"):
         if k in data:
             del data[k]
@@ -788,6 +831,7 @@ else:
             data[term_key] = term_env
         else:
             data.pop(term_key, None)
+    claude_count = set_claude_env(data, "")
     for k in ("remote.SSH.httpProxy", "remote.SSH.httpsProxy"):
         if k in data:
             del data[k]
@@ -802,6 +846,7 @@ after = {
 print(f"[proxy-mode] {mode}")
 print(f"[proxy-before] {before}")
 print(f"[proxy-after] {after}")
+print(f"[claude-env] {CLAUDE_ENV_KEY}: {claude_count} proxy var(s)")
 PY
 }
 
@@ -871,36 +916,61 @@ terminal_env_key() {
   esac
 }
 
+# Directories holding the Claude Code extension's bundled native binary.
+# Older builds ship resources/native-binary/, newer ones fan out per platform
+# under resources/native-binaries/<platform>-<arch>/.
+claude_native_dirs() {
+  local d sub
+  # Match -linux-x64, -linux-arm64, -darwin-x64, -darwin-arm64, -win32-x64, etc.
+  for d in "$VSCODE_EXT_ROOT"/anthropic.claude-code-*; do
+    if [ -d "$d/resources/native-binary" ]; then
+      echo "$d/resources/native-binary"
+    fi
+    if [ -d "$d/resources/native-binaries" ]; then
+      for sub in "$d"/resources/native-binaries/*; do
+        if [ -d "$sub" ]; then
+          echo "$sub"
+        fi
+      done
+    fi
+  done
+}
+
 # Wrap the Anthropic Claude Code bundled 'claude' native binary so it inherits
 # proxy env. The extension host spawns this child with a stripped environment,
 # bypassing HTTPS_PROXY. We rename the real binary to claude.real and replace
 # it with a bash shim that re-exports proxy env from $PROXY_URL_FILE before
 # exec'ing the real binary.
+#
+# On Windows the shipped binary is claude.exe and cannot be replaced by a shell
+# shim (CreateProcess would refuse it), so there we rely solely on the
+# 'claudeCode.environmentVariables' setting written by set_vscode_proxy — the
+# extension merges those into the env it spawns claude.exe with.
 wrap_claude_code() {
+  local proxy_url="$1"
   if [ "$WRAP_CLAUDE_CODE" != "1" ]; then
     log INFO "Claude Code auto-wrap disabled (WRAP_CLAUDE_CODE=$WRAP_CLAUDE_CODE)."
     return 0
   fi
+  echo "$proxy_url" > "$PROXY_URL_FILE"
   if [ "$HOST_OS" = "windows" ]; then
-    log INFO "Skipping Claude Code wrap on Windows."
+    log OK "Claude Code on Windows: proxy env injected via 'claudeCode.environmentVariables' (no binary shim needed)."
+    log INFO "Start a new Claude Code session (or reload the window) to pick it up."
     return 0
   fi
   if [ ! -d "$VSCODE_EXT_ROOT" ]; then
     log INFO "VS Code extensions dir not found: $VSCODE_EXT_ROOT — skipping Claude Code wrap."
     return 0
   fi
-  local proxy_url="$1"
-  echo "$proxy_url" > "$PROXY_URL_FILE"
 
   local wrapped_count=0
   local skipped_count=0
   local d bin_path real_path
-  # Match -linux-x64, -linux-arm64, -darwin-x64, -darwin-arm64, etc.
-  for d in "$VSCODE_EXT_ROOT"/anthropic.claude-code-*; do
-    [ -d "$d" ] || continue
-    bin_path="$d/resources/native-binary/claude"
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    bin_path="$d/claude"
     [ -f "$bin_path" ] || continue
-    real_path="$d/resources/native-binary/claude.real"
+    real_path="$d/claude.real"
 
     if [ -f "$real_path" ] && grep -q "remoteProxy-wrapper" "$bin_path" 2>/dev/null; then
       log INFO "Claude Code already wrapped: $bin_path"
@@ -937,7 +1007,7 @@ WRAPEOF
     chmod +x "$bin_path"
     log OK "Wrapped Claude Code binary: $bin_path"
     wrapped_count=$((wrapped_count + 1))
-  done
+  done < <(claude_native_dirs)
 
   if [ "$wrapped_count" = "0" ] && [ "$skipped_count" = "0" ]; then
     log INFO "No anthropic.claude-code-* extension found under $VSCODE_EXT_ROOT."
@@ -947,6 +1017,8 @@ WRAPEOF
 }
 
 unwrap_claude_code() {
+  rm -f "$PROXY_URL_FILE"
+  # Windows never installs a shim — set_vscode_proxy drops the injected env.
   if [ "$HOST_OS" = "windows" ]; then
     return 0
   fi
@@ -955,10 +1027,10 @@ unwrap_claude_code() {
   fi
   local unwrapped_count=0
   local d bin_path real_path
-  for d in "$VSCODE_EXT_ROOT"/anthropic.claude-code-*; do
-    [ -d "$d" ] || continue
-    bin_path="$d/resources/native-binary/claude"
-    real_path="$d/resources/native-binary/claude.real"
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    bin_path="$d/claude"
+    real_path="$d/claude.real"
     [ -f "$real_path" ] || continue
 
     # Only unwrap if bin_path is our shim
@@ -969,8 +1041,7 @@ unwrap_claude_code() {
       log OK "Unwrapped Claude Code binary: $bin_path"
       unwrapped_count=$((unwrapped_count + 1))
     fi
-  done
-  rm -f "$PROXY_URL_FILE"
+  done < <(claude_native_dirs)
   if [ "$unwrapped_count" = "0" ]; then
     log INFO "No wrapped Claude Code binaries found to restore."
   fi
@@ -1041,6 +1112,18 @@ vals = {
     "http.proxySupport": data.get("http.proxySupport", "<unset>"),
 }
 print(f"[proxy-state] {vals}")
+
+claude_env = data.get("claudeCode.environmentVariables")
+if isinstance(claude_env, dict):
+    claude_names = sorted(claude_env)
+elif isinstance(claude_env, list):
+    claude_names = sorted(
+        e.get("name", "") for e in claude_env if isinstance(e, dict)
+    )
+else:
+    claude_names = []
+proxy_names = [n for n in claude_names if n.lower() in ("https_proxy", "http_proxy", "no_proxy")]
+print(f"[claude-env] claudeCode.environmentVariables: {proxy_names or '<none>'}")
 PY
 }
 
@@ -1258,6 +1341,14 @@ else
   VSCODE_EXT_ROOT="$HOME/.vscode/extensions"
 fi
 
+# Paths supplied by the extension host in local mode (see setup script).
+if [ -n "\${VSCODE_SETTINGS_PATH:-}" ]; then
+  VSCODE_MACHINE_SETTINGS="$VSCODE_SETTINGS_PATH"
+fi
+if [ -n "\${VSCODE_EXT_DIR:-}" ]; then
+  VSCODE_EXT_ROOT="$VSCODE_EXT_DIR"
+fi
+
 mkdir -p "$TMP_DIR"
 
 # Read stored ports if available
@@ -1414,6 +1505,7 @@ else:
     data = {}
 
 PROXY_ENV_KEYS = ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy", "NO_PROXY", "no_proxy")
+CLAUDE_ENV_KEY = "claudeCode.environmentVariables"
 
 before = {
     "http.proxy": data.get("http.proxy", "<unset>"),
@@ -1430,6 +1522,22 @@ if isinstance(term_env, dict):
         data[term_key] = term_env
     else:
         data.pop(term_key, None)
+
+# Drop the proxy vars injected into the Claude Code extension's launch env,
+# keeping any entries the user added themselves.
+claude_env = data.get(CLAUDE_ENV_KEY)
+if isinstance(claude_env, dict):
+    claude_env = [{"name": k, "value": v} for k, v in claude_env.items()]
+if isinstance(claude_env, list):
+    kept = [
+        e for e in claude_env
+        if isinstance(e, dict) and e.get("name") not in PROXY_ENV_KEYS
+    ]
+    if kept:
+        data[CLAUDE_ENV_KEY] = kept
+    else:
+        data.pop(CLAUDE_ENV_KEY, None)
+
 for k in ("remote.SSH.httpProxy", "remote.SSH.httpsProxy"):
     if k in data:
         del data[k]
@@ -1467,7 +1575,25 @@ clear_server_env_setup() {
   log OK "Cleared proxy env block from $ENV_SETUP_FILE"
 }
 
+claude_native_dirs() {
+  local d sub
+  for d in "$VSCODE_EXT_ROOT"/anthropic.claude-code-*; do
+    if [ -d "$d/resources/native-binary" ]; then
+      echo "$d/resources/native-binary"
+    fi
+    if [ -d "$d/resources/native-binaries" ]; then
+      for sub in "$d"/resources/native-binaries/*; do
+        if [ -d "$sub" ]; then
+          echo "$sub"
+        fi
+      done
+    fi
+  done
+}
+
 unwrap_claude_code() {
+  rm -f "$PROXY_URL_FILE"
+  # Windows is env-injection only (see setup script) — nothing to restore.
   if [ "$HOST_OS" = "windows" ]; then
     return 0
   fi
@@ -1476,10 +1602,10 @@ unwrap_claude_code() {
   fi
   local unwrapped_count=0
   local d bin_path real_path
-  for d in "$VSCODE_EXT_ROOT"/anthropic.claude-code-*; do
-    [ -d "$d" ] || continue
-    bin_path="$d/resources/native-binary/claude"
-    real_path="$d/resources/native-binary/claude.real"
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    bin_path="$d/claude"
+    real_path="$d/claude.real"
     [ -f "$real_path" ] || continue
     if [ -f "$bin_path" ] && grep -q "remoteProxy-wrapper" "$bin_path" 2>/dev/null; then
       rm -f "$bin_path"
@@ -1488,8 +1614,7 @@ unwrap_claude_code() {
       log OK "Unwrapped Claude Code binary: $bin_path"
       unwrapped_count=$((unwrapped_count + 1))
     fi
-  done
-  rm -f "$PROXY_URL_FILE"
+  done < <(claude_native_dirs)
   if [ "$unwrapped_count" = "0" ]; then
     log INFO "No wrapped Claude Code binaries found to restore."
   fi

@@ -1,3 +1,5 @@
+import * as fs from "node:fs";
+import * as path from "node:path";
 import * as vscode from "vscode";
 import { resolveAccessKey, type AccessKeyRuntime } from "./accessKeyResolver";
 import {
@@ -196,9 +198,11 @@ export class ProxyService {
       }
 
       await this.runSetupAction("up", host, cfg, runtime, key, isLocal, entryRuntime, entryKey);
-      const claudeHint = cfg.wrapClaudeCode
-        ? " If a Claude Code session is open, close and reopen it (or reload the window) so the wrapped 'claude' binary is used."
-        : "";
+      const claudeHint = !cfg.wrapClaudeCode
+        ? ""
+        : isLocal && process.platform === "win32"
+          ? " Claude Code picks the proxy up from the 'claudeCode.environmentVariables' setting — start a new Claude Code session (running ones keep their old env)."
+          : " If a Claude Code session is open, close and reopen it (or reload the window) so the wrapped 'claude' binary is used.";
       const applyHint = isLocal
         ? `Reload the window (Ctrl+Shift+P → Reload Window) to apply.${claudeHint}`
         : `Reload the window to apply http.proxy and terminal env. For extensions whose subprocesses must also be proxied, run 'Remote-SSH: Kill VS Code Server on Host' and reconnect so server-env-setup is sourced.${claudeHint}`;
@@ -692,6 +696,38 @@ export class ProxyService {
     return this.executeScript(host, REVERT_REMOTE_SCRIPT, envVars, [], isLocal);
   }
 
+  /**
+   * Paths of the VS Code instance this extension host runs in, forward-slashed
+   * so the bash script can consume them under Git Bash on Windows.
+   *
+   * Only used in local mode: it lets the script write the settings.json and
+   * find the Claude Code extension of *this* install (Insiders, VSCodium,
+   * portable, custom --extensions-dir) instead of guessing default paths.
+   * Remote mode keeps using the VS Code Server's Machine settings.
+   */
+  private localVsCodePaths(): Record<string, string> {
+    const toPosix = (p: string): string => p.replace(/\\/gu, "/");
+    const result: Record<string, string> = {};
+    try {
+      // <userDataDir>/User/globalStorage/<publisher.name> → <userDataDir>/User
+      const userDir = path.resolve(this.context.globalStorageUri.fsPath, "..", "..");
+      if (fs.existsSync(userDir)) {
+        result.VSCODE_SETTINGS_PATH = toPosix(path.join(userDir, "settings.json"));
+      }
+      // Skipped when debugging: an Extension Development Host runs us from the
+      // source checkout, whose parent is not the extensions directory.
+      if (this.context.extensionMode !== vscode.ExtensionMode.Development) {
+        const extensionsDir = path.dirname(this.context.extensionPath);
+        if (fs.existsSync(extensionsDir)) {
+          result.VSCODE_EXT_DIR = toPosix(extensionsDir);
+        }
+      }
+    } catch {
+      // fall back to the script's built-in path detection
+    }
+    return result;
+  }
+
   private async executeScript(
     host: string,
     script: string,
@@ -700,6 +736,9 @@ export class ProxyService {
     isLocal?: boolean
   ): Promise<ScriptRunResult> {
     const cfg = this.getConfig();
+    if (isLocal) {
+      envVars = { ...envVars, ...this.localVsCodePaths() };
+    }
     const profileConfig: ClusterProfileConfig = {
       profile: cfg.clusterProfile,
       dockerContainer: cfg.dockerContainer,

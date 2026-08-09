@@ -32,7 +32,7 @@ After **Proxy: Enable**, what you need to do depends on which extension(s) you w
 |---|---|
 | Apply `http.proxy` to VS Code itself and to extensions that honor it | **Reload Window** (`Ctrl+Shift+P` → *Developer: Reload Window*) |
 | Pick up proxy env in **new** integrated terminals | Open a new terminal — existing terminals keep their old env |
-| Make Claude Code traverse the tunnel | **Reload Window** (the bundled `claude` binary is auto-wrapped during *Proxy: Enable*; the wrapper reads the current proxy URL on every invocation) |
+| Make Claude Code traverse the tunnel | Start a **new Claude Code session** (a running one keeps the env it was launched with). See [Claude Code](#claude-code) |
 | Proxy other extensions whose subprocesses strip env (rare) | **Remote-SSH: Kill VS Code Server on Host**, then reconnect. This causes `~/.vscode-server/server-env-setup` to be sourced fresh, so `HTTPS_PROXY` reaches the extension host process tree |
 
 A plain Reload Window restarts only the extension host child, which inherits its env from the long-running VS Code Server. To re-source `server-env-setup` you must restart VS Code Server itself (Kill VS Code Server on Host).
@@ -71,7 +71,7 @@ After **Proxy: Disable**, do the same Reload Window (and Kill VS Code Server if 
 | `remoteProxy.testExpectedHttpCodes` | `200,204,301,302,307,308,401,403` | Comma-separated HTTP codes treated as successful |
 | `remoteProxy.logTailLines` | `80` | Number of log lines to fetch |
 | `remoteProxy.confirmBeforeMutations` | `false` | Ask before enable/disable/reinstall |
-| `remoteProxy.wrapClaudeCode` | `true` | Auto-wrap the Anthropic Claude Code extension's bundled `claude` native binary so it inherits proxy env. Linux/macOS only. Restored on *Proxy: Disable* |
+| `remoteProxy.wrapClaudeCode` | `true` | Make the Anthropic Claude Code extension inherit proxy env. All platforms; see [Claude Code](#claude-code). Undone on *Proxy: Disable* |
 
 ## How It Works
 
@@ -84,9 +84,24 @@ After **Proxy: Disable**, do the same Reload Window (and Kill VS Code Server if 
    - `http.proxy = http://127.0.0.1:<httpPort>` + `http.proxySupport = on` in remote machine settings (`~/.vscode-server/data/Machine/settings.json`)
    - `terminal.integrated.env.<os>.{HTTPS_PROXY,HTTP_PROXY,…}` so new integrated terminals inherit it
    - Marker-delimited block in `~/.vscode-server/server-env-setup` so VS Code Server exports the env to its extension host process tree on next startup
-5. If `remoteProxy.wrapClaudeCode` is enabled, renames the Claude Code extension's bundled `claude` binary to `claude.real` and installs a small bash shim that re-exports proxy env (read from `~/.extensions-ssproxy/state/proxy_url`) before `exec`'ing the real binary. *Proxy: Disable* unwraps it.
+5. If `remoteProxy.wrapClaudeCode` is enabled, makes Claude Code inherit the proxy (see below). *Proxy: Disable* reverts it.
 
 Nothing system-wide is modified — login shells, cron, systemd, other users, and any process not spawned by VS Code Server are unaffected.
+
+## Claude Code
+
+The Claude Code extension spawns its bundled `claude` binary with an environment that doesn't carry `HTTPS_PROXY`, so the tunnel has to be handed to it explicitly. *Proxy: Enable* does that through two channels:
+
+| Channel | Where it applies | What it does |
+|---|---|---|
+| `claudeCode.environmentVariables` in VS Code settings | All platforms | The Claude Code extension merges these into the env it launches the binary with. This is the **only** channel that works on Windows, where the bundled binary is a native `claude.exe` that cannot be replaced by a shell shim |
+| Binary shim | Linux / macOS | Renames the bundled `claude` to `claude.real` and drops in a bash shim that re-exports proxy env (read from `~/.extensions-ssproxy/state/proxy_url`) before `exec`'ing it — so the current proxy URL is picked up on every invocation. Both the old `resources/native-binary/` and the newer `resources/native-binaries/<platform>-<arch>/` layouts are handled |
+
+Either way, **start a new Claude Code session** to pick up the change — an already-running one keeps the environment it was launched with.
+
+*Proxy: Disable* removes the injected variables (any entries you added to `claudeCode.environmentVariables` yourself are preserved) and restores the original binary.
+
+In local mode the extension passes its own VS Code paths to the script, so the settings file and extensions directory of the *running* instance are used — Insiders, VSCodium, portable installs, and a custom `--extensions-dir` all work.
 
 ## Bypassing payload-level DPI
 
@@ -164,9 +179,9 @@ If the stored password is rejected, it's cleared and a "Configure SSH Password" 
 
 ## Notes
 
-- This is **not** a system-wide VPN. It only proxies VS Code's extension-host process tree (and, when enabled, the wrapped Claude Code binary).
-- Some external CLIs started by extensions may bypass the VS Code proxy if they strip env and don't speak `http.proxy`. The Claude Code wrap is a targeted workaround for one such case.
-- Works in both Remote-SSH sessions and locally (the same script also runs on the local host when invoked without a remote authority).
+- This is **not** a system-wide VPN. It only proxies VS Code's extension-host process tree (and, when enabled, Claude Code).
+- Some external CLIs started by extensions may bypass the VS Code proxy if they strip env and don't speak `http.proxy`. The [Claude Code](#claude-code) handling is a targeted workaround for one such case.
+- Works in both Remote-SSH sessions and locally (the same script also runs on the local host when invoked without a remote authority). Local runs on Windows go through Git Bash, which must be installed.
 
 ## Development
 
